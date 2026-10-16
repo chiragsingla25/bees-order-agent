@@ -12,8 +12,16 @@ anyio==4.15.1
     #   httpx
     #   httpx2
     #   langsmith
+    #   mcp
     #   openai
+    #   sse-starlette
     #   starlette
+attrs==26.1.0
+    # via
+    #   jsonschema
+    #   referencing
+authlib==1.9.1
+    # via gradio
 brotli==1.2.0
     # via gradio
 certifi==2026.7.22
@@ -21,6 +29,8 @@ certifi==2026.7.22
     #   httpcore
     #   httpx
     #   requests
+cffi==2.1.1 ; platform_python_implementation != 'PyPy'
+    # via cryptography
 charset-normalizer==3.5.2
     # via requests
 click==8.5.0
@@ -31,6 +41,11 @@ colorama==0.4.6 ; sys_platform == 'win32'
     # via
     #   tqdm
     #   typer
+cryptography==50.0.2
+    # via
+    #   authlib
+    #   joserfc
+    #   pyjwt
 distro==1.9.0
     # via langsmith
 fastapi==0.143.2
@@ -70,8 +85,11 @@ httpx==0.28.1
     #   gradio-client
     #   langchain-core
     #   langgraph-sdk
+    #   mcp
     #   safehttpx
     #   spaces
+httpx-sse==0.4.3
+    # via mcp
 httpx2==2.13.1
     # via
     #   huggingface-hub
@@ -89,14 +107,22 @@ idna==3.20
     #   httpx
     #   httpx2
     #   requests
+itsdangerous==2.2.0
+    # via gradio
 jinja2==3.1.6
     # via gradio
 jiter==0.17.0
     # via openai
+joserfc==1.7.5
+    # via authlib
 jsonpatch==1.35
     # via langchain-core
 jsonpointer==3.2.1
     # via jsonpatch
+jsonschema==4.26.0
+    # via mcp
+jsonschema-specifications==2025.9.1
+    # via jsonschema
 langchain-core==1.6.11
     # via
     #   langgraph
@@ -125,6 +151,8 @@ markupsafe==3.0.4
     # via
     #   gradio
     #   jinja2
+mcp==1.30.0
+    # via gradio
 mdurl==0.1.2
     # via markdown-it-py
 numpy==2.5.4
@@ -154,7 +182,9 @@ pandas==3.0.6
     # via gradio
 pillow==12.3.0
     # via gradio
-pydantic==2.14.1
+pycparser==3.11 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'
+    # via cffi
+pydantic==2.12.5
     # via
     #   bees-order-agent
     #   fastapi
@@ -162,22 +192,34 @@ pydantic==2.14.1
     #   langchain-core
     #   langgraph
     #   langsmith
+    #   mcp
     #   openai
+    #   pydantic-settings
     #   spaces
-pydantic-core==2.50.1
+pydantic-core==2.41.5
     # via pydantic
+pydantic-settings==2.16.0
+    # via mcp
 pydub==0.25.1
     # via gradio
 pygments==2.21.0
     # via rich
+pyjwt==2.15.1
+    # via mcp
 python-dateutil==2.9.0.post0
     # via pandas
 python-dotenv==1.2.4
-    # via bees-order-agent
+    # via
+    #   bees-order-agent
+    #   pydantic-settings
 python-multipart==0.0.32
-    # via gradio
+    # via
+    #   gradio
+    #   mcp
 pytz==2026.5
     # via gradio
+pywin32==312 ; sys_platform == 'win32'
+    # via mcp
 pyyaml==6.0.3
     # via
     #   bees-order-agent
@@ -186,6 +228,10 @@ pyyaml==6.0.3
     #   langchain-core
 rapidfuzz==3.14.6
     # via bees-order-agent
+referencing==0.37.0
+    # via
+    #   jsonschema
+    #   jsonschema-specifications
 requests==2.34.2
     # via
     #   langsmith
@@ -195,6 +241,10 @@ requests-toolbelt==1.0.0
     # via langsmith
 rich==15.0.0
     # via typer
+rpds-py==2026.9.1
+    # via
+    #   jsonschema
+    #   referencing
 safehttpx==0.1.7
     # via gradio
 semantic-version==2.10.0
@@ -209,10 +259,14 @@ sniffio==1.3.1
     #   openai
 spaces==0.51.3
     # via bees-order-agent
+sse-starlette==3.5.0
+    # via mcp
 starlette==1.8.0
     # via
     #   fastapi
     #   gradio
+    #   mcp
+    #   sse-starlette
 tenacity==9.2.1
     # via langchain-core
 tomlkit==0.14.0
@@ -238,17 +292,22 @@ typing-extensions==4.16.0
     #   langchain-core
     #   langchain-protocol
     #   langsmith
+    #   mcp
     #   openai
     #   opentelemetry-api
     #   pydantic
     #   pydantic-core
+    #   pydantic-settings
+    #   referencing
     #   spaces
     #   starlette
     #   typing-inspection
 typing-inspection==0.4.4
     # via
     #   fastapi
+    #   mcp
     #   pydantic
+    #   pydantic-settings
 tzdata==2026.5 ; sys_platform == 'emscripten' or sys_platform == 'win32'
     # via pandas
 urllib3==2.8.0
@@ -258,7 +317,9 @@ uuid-utils==0.17.1
     #   langchain-core
     #   langsmith
 uvicorn==0.54.0
-    # via gradio
+    # via
+    #   gradio
+    #   mcp
 websockets==16.1.1
     # via
     #   langgraph-sdk
