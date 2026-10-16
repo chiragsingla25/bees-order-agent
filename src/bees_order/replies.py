@@ -39,6 +39,8 @@ T = {
         "cancelled": "Pedido cancelado. Nada foi salvo.",
         "stock_changed": "O estoque mudou enquanto você decidia. Aqui está o pedido atualizado:",
         "pending": "Você tem um pedido aguardando. Toque em *Aprovar* ou *Cancelar*.",
+        "limit_session": "Você atingiu o limite de {n} pedidos desta demo. Tente mais tarde.",
+        "limit_daily": "A demo atingiu o limite diário de uso. Volte amanhã.",
     },
     "en": {
         "cart_title": "🛒 *Your order*",
@@ -65,8 +67,17 @@ T = {
         "cancelled": "Order cancelled. Nothing was saved.",
         "stock_changed": "Stock changed while you were deciding. Here is the updated order:",
         "pending": "You have an order waiting. Tap *Approve* or *Cancel*.",
+        "limit_session": "You've reached this demo's limit of {n} orders per session.",
+        "limit_daily": "The demo has reached its daily usage limit. Please come back tomorrow.",
     },
 }
+
+
+def limit_text(override: str | None, kind: str, **kw) -> str:
+    """Limit replies: one language when the toggle forces it, bilingual in Auto."""
+    if override:
+        return t(override, f"limit_{kind}", **kw)
+    return (LIMIT_SESSION if kind == "session" else LIMIT_DAILY).format(**kw)
 
 
 def t(lang: str, key: str, **kw) -> str:

@@ -29,7 +29,8 @@ _SPLIT_RE = re.compile(r"\s*(?:,|;|\n|\be\b|\band\b)\s*")
 
 class OrderState(TypedDict, total=False):
     message: str
-    language: str
+    language: str  # detected from the message
+    lang_override: str | None  # "pt" | "en" from the UI toggle; None = Auto (Phase 5)
     status: str | None  # refused | no_items | error | not_configured | empty | approved | cancelled
     reply: str
     parsed: dict | None
@@ -40,6 +41,11 @@ class OrderState(TypedDict, total=False):
     order_id: int | None
     llm: dict | None  # model, attempts, cost of the parse call
     trace: Annotated[list[dict], operator.add]
+
+
+def _lang(state: OrderState, detected: str | None = None) -> str:
+    """Reply language: the toggle wins, then the detected language, then PT."""
+    return state.get("lang_override") or detected or state.get("language") or "pt"
 
 
 def _step(name: str, t0: float, inp: Any, out: Any) -> list[dict]:
@@ -61,15 +67,16 @@ def build_graph(conn, parser: Callable[[str], ParseResult], lock=None,
         try:
             result = parser(msg)
         except NotConfigured as exc:
-            return {"status": "not_configured", "reply": replies.t("pt", "not_configured"),
+            return {"status": "not_configured",
+                    "reply": replies.t(_lang(state), "not_configured"),
                     "trace": _step("parse", t0, msg, {"error": str(exc)})}
         except ParseError as exc:
-            return {"status": "error", "reply": replies.t("pt", "error"),
+            return {"status": "error", "reply": replies.t(_lang(state), "error"),
                     "trace": _step("parse", t0, msg, {"error": str(exc)[:300]})}
         parsed = result.parsed
-        lang = parsed.language
+        lang = _lang(state, parsed.language)
         update: OrderState = {
-            "parsed": parsed.model_dump(), "language": lang,
+            "parsed": parsed.model_dump(), "language": parsed.language,
             "llm": {"model": result.model, "attempts": result.attempts,
                     "cost_usd": result.cost_usd},
         }
@@ -107,7 +114,7 @@ def build_graph(conn, parser: Callable[[str], ParseResult], lock=None,
             else "build_cart"
 
     def clarify_node(state: OrderState):
-        lang = state.get("language", "pt")
+        lang = _lang(state)
         prods = products()
         pending = [r for r in state["resolved"] if r["status"] == "ambiguous"]
         question = replies.clarify_text(lang, pending, prods,
@@ -156,7 +163,7 @@ def build_graph(conn, parser: Callable[[str], ParseResult], lock=None,
                                  ("product_text", "quantity", "unit", "sku", "status")})
                  for r in state["resolved"]]
         cart = build_cart(items, prods)
-        lang = state.get("language", "pt")
+        lang = _lang(state)
         text = replies.cart_text(lang, cart, prods)
         if prefix:
             text = prefix + "\n\n" + text
@@ -188,7 +195,7 @@ def build_graph(conn, parser: Callable[[str], ParseResult], lock=None,
 
     def commit_node(state: OrderState):
         t0 = time.perf_counter()
-        lang = state.get("language", "pt")
+        lang = _lang(state)
         if state["decision"] == "cancel":
             return Command(goto=END, update={
                 "status": "cancelled", "reply": replies.t(lang, "cancelled"),

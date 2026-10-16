@@ -35,3 +35,24 @@ def test_cart_card_escapes_user_text(products):
     cart = build_cart([ResolvedItem(product_text=evil, quantity=1, status="unknown")], products)
     html = cart_html("pt", cart, products)
     assert "<img" not in html and "&lt;img" in html
+
+
+def test_labels_cover_every_mode_and_element():  # Phase 5 labels
+    from bees_order.ui import EXAMPLES, LABELS, header_md
+    keys = set(LABELS["auto"])
+    for mode in ("pt", "en"):
+        assert set(LABELS[mode]) == keys
+        assert len(LABELS[mode]["chips"]) == len(EXAMPLES) == 4
+        assert len(LABELS[mode]["cols"]) == 4
+    assert "/" not in LABELS["en"]["approve"] and "/" not in LABELS["pt"]["approve"]
+    assert "Aprovar / Approve" in LABELS["auto"]["approve"]  # Auto keeps bilingual labels
+    assert "Demo não oficial" in header_md("pt", "2", "https://x")
+    assert "Unofficial demo" in header_md("en", "2", "https://x")
+
+
+def test_toggle_is_per_session(conn):  # Phase 5: two sessions don't share it
+    a, b = Session(), Session()
+    a.lang_override = "en"
+    agent = OrderAgent(conn, stub)
+    assert "Your order" in agent.handle(a, "x").reply
+    assert "Seu pedido" in agent.handle(b, "x").reply

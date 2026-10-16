@@ -26,9 +26,14 @@ class Session:
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     order_seq: int = 0
     mode: str = "idle"  # idle | clarify | approval
-    language: str = "pt"
+    language: str = "pt"  # last detected message language
+    lang_override: str | None = None  # "pt" | "en" from the UI toggle; None = Auto (Phase 5)
     trace_len: int = 0
     llm_messages: int = 0  # messages that called the LLM (R16 session limit)
+
+    @property
+    def reply_lang(self) -> str:
+        return self.lang_override or self.language
 
     @property
     def thread_id(self) -> str:
@@ -45,6 +50,7 @@ class Turn:
     trace: list[dict] = field(default_factory=list)
     llm: dict | None = None
     ms: float = 0.0
+    lang: str = "pt"  # language the reply is written in
 
 
 class OrderAgent:
@@ -66,24 +72,26 @@ class OrderAgent:
         with self.lock:
             db.maybe_reset(self.conn)  # R17
         if s.mode == "approval":
-            return Turn(reply=replies.t(s.language, "pending"), status="pending",
-                        cart=self._state(s).get("cart"), ms=self._ms(t0))
+            return Turn(reply=replies.t(s.reply_lang, "pending"), status="pending",
+                        cart=self._state(s).get("cart"), ms=self._ms(t0), lang=s.reply_lang)
         if s.mode == "clarify" and normalize(text) in CANCEL_WORDS:
             s.mode = "idle"  # the interrupted thread is simply abandoned; nothing was written
-            return Turn(reply=replies.t(s.language, "cancelled"), status="cancelled",
-                        ms=self._ms(t0))
+            return Turn(reply=replies.t(s.reply_lang, "cancelled"), status="cancelled",
+                        ms=self._ms(t0), lang=s.reply_lang)
         if s.mode == "clarify":
-            result = self.graph.invoke(Command(resume=text), self._cfg(s))
+            result = self.graph.invoke(self._resume(s, text), self._cfg(s))
         else:
             if self.limits and s.llm_messages >= self.limits.session_limit:
-                return Turn(reply=replies.LIMIT_SESSION.format(n=self.limits.session_limit),
-                            status="limit_session", ms=self._ms(t0))
+                return Turn(reply=replies.limit_text(s.lang_override, "session",
+                                                     n=self.limits.session_limit),
+                            status="limit_session", ms=self._ms(t0), lang=s.reply_lang)
             if self.limits and self.limits.daily.exhausted():
-                return Turn(reply=replies.LIMIT_DAILY, status="limit_daily", ms=self._ms(t0))
+                return Turn(reply=replies.limit_text(s.lang_override, "daily"),
+                            status="limit_daily", ms=self._ms(t0), lang=s.reply_lang)
             s.order_seq += 1
             s.trace_len = 0
-            result = self.graph.invoke({"message": text, "trace": [], "status": None},
-                                       self._cfg(s))
+            result = self.graph.invoke({"message": text, "trace": [], "status": None,
+                                        "lang_override": s.lang_override}, self._cfg(s))
         return self._turn(s, result, t0)
 
     def approve(self, s: Session) -> Turn:
@@ -96,8 +104,14 @@ class OrderAgent:
         t0 = time.perf_counter()
         if s.mode != "approval":
             return Turn(reply="", status="no_pending")
-        result = self.graph.invoke(Command(resume=decision), self._cfg(s))
+        result = self.graph.invoke(self._resume(s, decision), self._cfg(s))
         return self._turn(s, result, t0)
+
+    @staticmethod
+    def _resume(s: Session, value: str) -> Command:
+        # Carry the current toggle into the paused thread, so a switch mid-order applies
+        # to the very next reply (Phase 5).
+        return Command(resume=value, update={"lang_override": s.lang_override})
 
     def _state(self, s: Session) -> dict:
         return self.graph.get_state(self._cfg(s)).values
@@ -120,8 +134,8 @@ class OrderAgent:
             s.mode = "clarify" if payload["kind"] == "clarify" else "approval"
             status = "clarify" if s.mode == "clarify" else "cart"
             return Turn(reply=payload["reply"], status=status, cart=result.get("cart"),
-                        trace=new_trace, llm=llm, ms=self._ms(t0))
+                        trace=new_trace, llm=llm, ms=self._ms(t0), lang=s.reply_lang)
         s.mode = "idle"
         return Turn(reply=result.get("reply", ""), status=result.get("status") or "error",
                     cart=result.get("cart"), order_id=result.get("order_id"),
-                    trace=new_trace, llm=llm, ms=self._ms(t0))
+                    trace=new_trace, llm=llm, ms=self._ms(t0), lang=s.reply_lang)
