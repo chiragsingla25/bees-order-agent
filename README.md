@@ -126,4 +126,4 @@ tests/                  # one test per rule
 - A "help me choose" path for retailers who don't know what to order (lead generation).
 - RAG over policy and FAQ documents for non-order questions.
 - Tracing to Langfuse or MLflow, and the eval gated in CI.
-- A Docker image and production serving (ONNX / KServe / Triton), with observability.
+- A Docker image and production serving (autoscaling, monitoring, alerting).
