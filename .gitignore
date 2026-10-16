@@ -1,0 +1,27 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# runtime output
+runs/
+*.db
+*.db-journal
+*.sqlite
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.gradio/
+
+# os
+.DS_Store
+Thumbs.db
+
+# local Claude Code state
+.claude/*.lock
+.claude/settings.local.json

@@ -1,0 +1,88 @@
+"""Shared data types. Money is integer cents (BRL) everywhere; format only at display time."""
+
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
+
+Unit = Literal["pack", "unit", "none"]
+LineFlag = Literal["ok", "short", "unavailable", "over_cap", "invalid_qty", "not_added", "unknown"]
+
+
+class ParsedItem(BaseModel):
+    product_text: str
+    quantity: float
+    unit: Unit = "none"
+
+
+class ParsedOrder(BaseModel):
+    intent: Literal["order", "off_topic", "data_request"]
+    language: Literal["pt", "en"] = "pt"
+    items: list[ParsedItem] = Field(default_factory=list)
+
+
+class Product(BaseModel):
+    sku: str
+    name: str
+    brand: str
+    line: str
+    container: str  # lata | latao | litrao | garrafa | longneck | pet
+    size_ml: int
+    variant: str | None = None  # zero | duplomalte | None
+    pack_type: Literal["cx", "fardo", "engradado"]
+    units_per_pack: int
+    unit_price_cents: int
+    aliases: list[str] = Field(default_factory=list)
+    stock: int  # units
+
+
+class MatchResult(BaseModel):
+    status: Literal["matched", "ambiguous", "unknown"]
+    sku: str | None = None
+    candidates: list[str] = Field(default_factory=list)
+    score: float = 0.0
+
+
+class ResolvedItem(BaseModel):
+    """A parsed item after matching: what build_cart consumes."""
+
+    product_text: str
+    quantity: float
+    unit: Unit = "none"
+    sku: str | None = None
+    status: Literal["matched", "unknown", "not_added"] = "matched"
+
+
+class CartLine(BaseModel):
+    sku: str | None
+    name: str
+    packs: int = 0
+    units: int = 0  # units in the cart (after shortage reduction)
+    requested_units: int = 0
+    unit_price_cents: int = 0
+    line_total_cents: int = 0
+    flag: LineFlag = "ok"
+    available: int | None = None  # in packs for pack orders, units for unit orders
+    available_unit: Literal["pack", "unit"] | None = None
+
+
+class Cart(BaseModel):
+    lines: list[CartLine] = Field(default_factory=list)
+    total_cents: int = 0
+    currency: str = "BRL"
+
+    @property
+    def billable(self) -> list[CartLine]:
+        return [ln for ln in self.lines if ln.flag in ("ok", "short") and ln.units > 0]
+
+
+class OrderResult(BaseModel):
+    status: Literal["approved", "stock_changed", "empty"]
+    order_id: int | None = None
+    total_cents: int = 0
+
+
+class TraceStep(BaseModel):
+    step: str
+    input: Any = None
+    output: Any = None
+    ms: float = 0.0
