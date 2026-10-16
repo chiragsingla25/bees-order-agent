@@ -123,5 +123,7 @@ tests/                  # one test per rule
 - Substitute suggestions when an item is short.
 - Promotions, recommendations and the real catalog.
 - Rep / human sign-off for large orders.
+- A "help me choose" path for retailers who don't know what to order (lead generation).
+- RAG over policy and FAQ documents for non-order questions.
 - Tracing to Langfuse or MLflow, and the eval gated in CI.
-- Production serving and observability.
+- A Docker image and production serving (ONNX / KServe / Triton), with observability.
