@@ -43,5 +43,5 @@ class DailyCallCap:
 class Limits:
     def __init__(self, session_limit: int | None = None, daily: DailyCallCap | None = None):
         self.session_limit = (session_limit if session_limit is not None
-                              else int(os.getenv("SESSION_MESSAGE_LIMIT", "20")))
+                              else int(os.getenv("SESSION_MESSAGE_LIMIT", "40")))
         self.daily = daily or DailyCallCap()

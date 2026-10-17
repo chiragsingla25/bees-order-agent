@@ -67,6 +67,7 @@ source = { editable = "." }
 dependencies = [
     { name = "gradio", extra = ["mcp", "oauth"] },
     { name = "langgraph" },
+    { name = "langsmith" },
     { name = "openai" },
     { name = "pydantic" },
     { name = "python-dotenv" },
@@ -85,6 +86,7 @@ dev = [
 requires-dist = [
     { name = "gradio", extras = ["mcp", "oauth"], specifier = ">=6.30,<7" },
     { name = "langgraph", specifier = ">=1.2,<2" },
+    { name = "langsmith", specifier = ">=0.14" },
     { name = "openai", specifier = ">=3.31" },
     { name = "pydantic", specifier = ">=2.11" },
     { name = "python-dotenv", specifier = ">=1.0" },

@@ -9,8 +9,9 @@ import pytest
 from bees_order import llm
 from bees_order.llm import NotConfigured, OpenRouterParser, ParseError
 
-GOOD = json.dumps({"intent": "order", "language": "pt",
-                   "items": [{"product_text": "brahma lata", "quantity": 3, "unit": "pack"}]})
+GOOD = json.dumps({"intent": "order",
+                   "items": [{"action": "add", "product_text": "brahma lata", "quantity": 3,
+                              "unit": "pack"}]})
 
 
 class FakeClient:
@@ -104,3 +105,38 @@ def test_fallback_retry_does_not_carry_primary_messages():
     client = FakeClient([TimeoutError("slow"), GOOD])
     OpenRouterParser(model="m1", fallback="m2", client=client)("x")
     assert len(client.calls[1]["messages"]) == 2
+
+
+def test_cart_names_reach_the_prompt_and_nothing_else():  # Phase 6: "make it 6" needs context
+    client = FakeClient([GOOD, GOOD])
+    parser = OpenRouterParser(model="m1", fallback="", client=client)
+    parser("make the brahma 6", ["Brahma Chopp Can 350 ml", "Skol Can 350 ml"])
+    msgs = client.calls[0]["messages"]
+    assert msgs[1] == {"role": "system",
+                       "content": "Products in the cart: Brahma Chopp Can 350 ml; Skol Can 350 ml"}
+    assert msgs[-1] == {"role": "user", "content": "make the brahma 6"}
+    assert "R$" not in str(msgs)  # still no prices or stock
+    parser("2 cx skol")  # empty cart → no cart message at all
+    assert [m["role"] for m in client.calls[1]["messages"]] == ["system", "user"]
+
+
+def test_schema_requires_an_action_per_item():
+    item = llm.JSON_SCHEMA["schema"]["properties"]["items"]["items"]
+    assert item["properties"]["action"]["enum"] == ["add", "set", "remove"]
+    assert "action" in item["required"]
+    assert "language" not in llm.JSON_SCHEMA["schema"]["properties"]  # English-only app
+
+
+def test_langsmith_tracing_only_with_both_env_vars(monkeypatch):  # Phase 7
+    from openai import OpenAI
+
+    def create_is_plain():
+        c = OpenAI(api_key="x", base_url=llm.OPENROUTER_URL)
+        plain = c.chat.completions.create
+        return llm.traced(c).chat.completions.create == plain
+
+    assert create_is_plain()  # neither set (conftest clears them)
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    assert create_is_plain()  # no key → still off, nothing sent
+    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2-test")
+    assert llm.tracing_on() and not create_is_plain()  # wrapped: the call joins the trace

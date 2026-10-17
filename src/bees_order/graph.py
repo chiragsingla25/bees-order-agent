@@ -1,17 +1,21 @@
-"""The order workflow: a fixed LangGraph pipeline with one LLM node and two human pauses.
+"""The order workflow: a fixed LangGraph pipeline with one LLM node.
 
-parse (LLM) → match_stock → [clarify ⟲ interrupt] → build_cart → await_approval (interrupt) → commit
+Each browser session has one graph thread, and the thread's state keeps that session's draft
+cart between messages. Every call to the graph does one of three things, chosen by `action`:
 
-State holds only plain JSON-able values (Pydantic models are dumped), so any checkpointer works.
-Code before an `interrupt()` re-runs on resume, so nodes do nothing with side effects before it.
+    message      parse (LLM) → find_products → [ask ⟲ interrupt] → update_cart
+    place_order  place_order   (one SQLite transaction, R15)
+    clear        clear_cart
+
+`ask` pauses the graph with `interrupt()` until the customer answers. Code before an
+`interrupt()` runs again on resume, so `ask` does nothing with side effects before it.
+State holds only plain JSON-able values (Pydantic models are dumped).
 """
 
-import operator
 import re
 import threading
-import time
 from collections.abc import Callable
-from typing import Annotated, Any, TypedDict
+from typing import TypedDict
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -20,209 +24,254 @@ from langgraph.types import Command, interrupt
 from bees_order import db, replies
 from bees_order.cart import build_cart
 from bees_order.llm import NotConfigured, ParseError, ParseResult
-from bees_order.matching import match, resolve_among
-from bees_order.schemas import Cart, ResolvedItem, TraceStep
+from bees_order.matching import match, normalize, resolve_among
+from bees_order.replies import t
+from bees_order.schemas import Cart, MatchResult, Product, ResolvedItem
 
-MAX_CLARIFY_ATTEMPTS = 2
+MAX_ASKS = 2  # a second unclear answer gives up on that product (R8)
+CANCEL_WORDS = {"cancel", "clear", "clear cart", "start over", "never mind", "nevermind",
+                "cancelar", "cancela", "esquece", "deixa", "recomecar"}
+# Inside a question a plain "no" also means "forget it". Outside one, "no" mustn't clear
+# the whole cart, so these extra words only count as answers.
+ANSWER_CANCEL_WORDS = CANCEL_WORDS | {"no", "nao", "nope", "stop", "deixa pra la", "nenhum"}
 _SPLIT_RE = re.compile(r"\s*(?:,|;|\n|\be\b|\band\b)\s*")
 
 
-class OrderState(TypedDict, total=False):
+class CartState(TypedDict, total=False):
+    # Input for this call
+    action: str  # "message" | "place_order" | "clear"
     message: str
-    language: str  # detected from the message
-    lang_override: str | None  # "pt" | "en" from the UI toggle; None = Auto (Phase 5)
-    status: str | None  # refused | no_items | error | not_configured | empty | approved | cancelled
+    # Kept between calls: the session's draft cart
+    items: list[dict]  # ResolvedItem dumps: what the customer asked for, in order
+    cart: dict | None  # Cart dump: the items priced against stock
+    # Working values for this call
+    edits: list[dict]  # the parsed items of this message, plus what they matched
+    attempts: int  # answers tried for the open question
+    status: str | None
     reply: str
-    parsed: dict | None
-    resolved: list[dict]  # ResolvedItem dumps + "candidates"
-    clarify_attempts: int
-    cart: dict | None
-    decision: str | None
     order_id: int | None
-    llm: dict | None  # model, attempts, cost of the parse call
-    trace: Annotated[list[dict], operator.add]
+    llm: dict | None  # model, attempts and cost of the parse call
 
 
-def _lang(state: OrderState, detected: str | None = None) -> str:
-    """Reply language: the toggle wins, then the detected language, then PT."""
-    return state.get("lang_override") or detected or state.get("language") or "pt"
-
-
-def _step(name: str, t0: float, inp: Any, out: Any) -> list[dict]:
-    ms = round((time.perf_counter() - t0) * 1000, 1)
-    return [TraceStep(step=name, input=inp, output=out, ms=ms).model_dump()]
-
-
-def build_graph(conn, parser: Callable[[str], ParseResult], lock=None,
-                checkpointer=None):
+def build_graph(conn, parser: Callable[..., ParseResult], lock=None, checkpointer=None):
     lock = lock or threading.RLock()
 
-    def products():
+    def products() -> dict[str, Product]:
         with lock:
             return db.get_products(conn)
 
-    def parse_node(state: OrderState):
-        t0 = time.perf_counter()
-        msg = state["message"]
+    def route(state: CartState) -> str:
+        return {"place_order": "place_order", "clear": "clear_cart"}.get(state["action"], "parse")
+
+    # ---- message: parse → find_products → [ask] → update_cart ---------------------------
+
+    def parse(state: CartState):
+        cart_names = [ln["name"] for ln in (state.get("cart") or {}).get("lines", [])]
         try:
-            result = parser(msg)
-        except NotConfigured as exc:
-            return {"status": "not_configured",
-                    "reply": replies.t(_lang(state), "not_configured"),
-                    "trace": _step("parse", t0, msg, {"error": str(exc)})}
-        except ParseError as exc:
-            return {"status": "error", "reply": replies.t(_lang(state), "error"),
-                    "trace": _step("parse", t0, msg, {"error": str(exc)[:300]})}
+            result = parser(state["message"], cart_names)
+        except NotConfigured:
+            return {"status": "not_configured", "reply": t("not_configured")}
+        except ParseError:
+            return {"status": "error", "reply": t("error")}
         parsed = result.parsed
-        lang = _lang(state, parsed.language)
-        update: OrderState = {
-            "parsed": parsed.model_dump(), "language": parsed.language,
-            "llm": {"model": result.model, "attempts": result.attempts,
-                    "cost_usd": result.cost_usd},
-        }
-        # R13: items win. A message with order items is processed whatever else it asks;
-        # the refusal templates are only for messages with no items.
+        update = {"edits": [it.model_dump() for it in parsed.items],
+                  "llm": {"model": result.model, "attempts": result.attempts,
+                          "cost_usd": result.cost_usd}}
+        # R13: items win. The refusal replies are only for messages with no items.
         if not parsed.items:
             key = {"off_topic": "refuse_off_topic", "data_request": "refuse_data"}.get(
                 parsed.intent, "no_items")
             update |= {"status": "no_items" if key == "no_items" else "refused",
-                       "reply": replies.t(lang, key)}
-        update["trace"] = _step("parse", t0, msg,
-                                {**parsed.model_dump(), "model": result.model,
-                                 "attempts": result.attempts})
+                       "reply": t(key)}
         return update
 
-    def after_parse(state: OrderState) -> str:
-        return END if state.get("status") else "match_stock"
+    def after_parse(state: CartState) -> str:
+        return END if state.get("status") else "find_products"
 
-    def match_stock_node(state: OrderState):
-        t0 = time.perf_counter()
+    def find_products(state: CartState):
         prods = products()
-        resolved, out = [], []
-        for it in state["parsed"]["items"]:
-            m = match(it["product_text"], prods)
-            status = {"matched": "matched", "unknown": "unknown"}.get(m.status, "ambiguous")
-            resolved.append({**it, "sku": m.sku, "status": status, "candidates": m.candidates})
-            out.append({"text": it["product_text"], "match": m.status, "sku": m.sku,
-                        "candidates": m.candidates, "score": round(m.score, 1),
-                        "stock_units": prods[m.sku].stock if m.sku else None})
-        return {"resolved": resolved, "clarify_attempts": 0,
-                "trace": _step("match_stock", t0, [i["product_text"] for i in resolved], out)}
+        items = state.get("items") or []
+        edits = []
+        for e in state["edits"]:
+            if e["action"] == "add":
+                m = match(e["product_text"], prods)
+            else:  # set / remove only look at what is already in the cart
+                m = _find_in_cart(e["product_text"], items, prods)
+            edits.append({**e, "status": m.status, "sku": m.sku, "candidates": m.candidates})
+        return {"edits": edits, "attempts": 0}
 
-    def after_match(state: OrderState) -> str:
-        return "clarify" if any(r["status"] == "ambiguous" for r in state["resolved"]) \
-            else "build_cart"
+    def after_find(state: CartState) -> str:
+        return "ask" if any(e["status"] == "ambiguous" for e in state["edits"]) \
+            else "update_cart"
 
-    def clarify_node(state: OrderState):
-        lang = _lang(state)
+    def ask(state: CartState):
         prods = products()
-        pending = [r for r in state["resolved"] if r["status"] == "ambiguous"]
-        question = replies.clarify_text(lang, pending, prods,
-                                        retry=state.get("clarify_attempts", 0) > 0)
-        answer = interrupt({"kind": "clarify", "reply": question,
-                            "options": [[prods[s].name for s in r["candidates"]]
-                                        for r in pending]})
-        t0 = time.perf_counter()
-        parts = [p for p in _SPLIT_RE.split(str(answer).strip()) if p]
-        if len(parts) != len(pending):
-            # A bare option number can't say which line it answers → re-ask (clarified Phase 3).
-            # A container/size word ("lata") may still apply to every line.
-            whole = "" if len(pending) > 1 and str(answer).strip().isdigit() else str(answer)
-            parts = [whole] * len(pending)
-        resolved = [dict(r) for r in state["resolved"]]
-        attempts = state.get("clarify_attempts", 0) + 1
-        out, k = [], 0
-        for r in resolved:
-            if r["status"] != "ambiguous":
-                continue
-            part = parts[k].strip()
-            k += 1
-            cands = r["candidates"]
-            if part.isdigit() and 1 <= int(part) <= len(cands):
-                sku = cands[int(part) - 1]
-            else:
-                m = resolve_among(part, cands, prods)
-                sku = m.sku if m.status == "matched" else None
-            if sku:
-                r |= {"sku": sku, "status": "matched", "candidates": [sku]}
-            elif attempts >= MAX_CLARIFY_ATTEMPTS:
-                r |= {"status": "not_added", "sku": cands[0] if len(cands) == 1 else None}
-            out.append({"text": r["product_text"], "answer": part, "status": r["status"],
-                        "sku": r.get("sku")})
-        still = any(r["status"] == "ambiguous" for r in resolved)
-        return Command(
-            goto="clarify" if still else "build_cart",
-            update={"resolved": resolved, "clarify_attempts": attempts,
-                    "trace": _step("clarify", t0, str(answer), out)},
-        )
+        attempts = state.get("attempts", 0)
+        open_qs = [e for e in state["edits"] if e["status"] == "ambiguous"]
+        answer = str(interrupt({"question": replies.clarify_text(open_qs, prods,
+                                                                 retry=attempts > 0)})).strip()
+        attempts += 1
+        if normalize(answer) in ANSWER_CANCEL_WORDS:
+            answers = ["cancel"] * len(open_qs)
+        else:
+            answers = [p for p in _SPLIT_RE.split(answer) if p]
+            if len(answers) != len(open_qs):
+                # One answer for several questions: a bare number can't say which one it
+                # answers (→ ask again), but a size or container word ("lata") fits them all.
+                one_number = len(open_qs) > 1 and answer.isdigit()
+                answers = ["" if one_number else answer] * len(open_qs)
+        edits, k = [], 0
+        for e in state["edits"]:
+            e = dict(e)
+            if e["status"] == "ambiguous":
+                e |= _answer(e, answers[k], attempts, prods)
+                k += 1
+            edits.append(e)
+        still_open = any(e["status"] == "ambiguous" for e in edits)
+        return Command(goto="ask" if still_open else "update_cart",
+                       update={"edits": edits, "attempts": attempts})
 
-    def _cart_update(state: OrderState, prefix: str | None = None):
-        t0 = time.perf_counter()
+    def update_cart(state: CartState):
         prods = products()
-        items = [ResolvedItem(**{k: r.get(k) for k in
-                                 ("product_text", "quantity", "unit", "sku", "status")})
-                 for r in state["resolved"]]
-        cart = build_cart(items, prods)
-        lang = _lang(state)
-        text = replies.cart_text(lang, cart, prods)
-        if prefix:
-            text = prefix + "\n\n" + text
-        update = {"cart": cart.model_dump(), "reply": text,
-                  "trace": _step("build_cart", t0, len(items),
-                                 {"lines": [ln.model_dump(include={"sku", "units", "flag",
-                                                                   "line_total_cents"})
-                                            for ln in cart.lines],
-                                  "total_cents": cart.total_cents})}
+        items = [dict(i) for i in state.get("items") or []]
+        events = [_apply(e, items, prods) for e in state["edits"]]
+        cart = build_cart([ResolvedItem(**i) for i in items], prods)
+        return {"items": items, "cart": cart.model_dump(), "status": "cart",
+                "reply": _describe(events, cart, prods), "edits": []}
+
+    # ---- place_order and clear ------------------------------------------------------------
+
+    def place_order(state: CartState):
+        cart = Cart(**state["cart"]) if state.get("cart") else Cart()
         if not cart.billable:
-            update["status"] = "empty"
-        return update
-
-    def build_cart_node(state: OrderState):
-        return _cart_update(state)
-
-    def after_cart(state: OrderState) -> str:
-        return END if state.get("status") == "empty" else "await_approval"
-
-    def await_approval_node(state: OrderState):
-        decision = interrupt({"kind": "approval", "reply": state["reply"],
-                              "cart": state["cart"]})
-        if decision not in ("approve", "cancel"):
-            return Command(goto="await_approval")
-        t0 = time.perf_counter()  # after the interrupt, so a resume doesn't log twice
-        return Command(goto="commit", update={
-            "decision": decision,
-            "trace": _step("await_approval", t0, "cart shown", {"decision": decision})})
-
-    def commit_node(state: OrderState):
-        t0 = time.perf_counter()
-        lang = _lang(state)
-        if state["decision"] == "cancel":
-            return Command(goto=END, update={
-                "status": "cancelled", "reply": replies.t(lang, "cancelled"),
-                "trace": _step("commit", t0, "cancel", {"status": "cancelled"})})
+            return {"status": "nothing_to_order", "reply": t("nothing_to_order")}
         with lock:
-            result = db.commit_order(conn, Cart(**state["cart"]))
-        step = _step("commit", t0, "approve", result.model_dump())
+            result = db.commit_order(conn, cart)  # re-checks stock first (R15)
         if result.status == "approved":
-            return Command(goto=END, update={
-                "status": "approved", "order_id": result.order_id, "trace": step,
-                "reply": replies.t(lang, "approved", order_id=result.order_id,
-                                   total=replies.brl(result.total_cents))})
-        update = _cart_update(state, prefix=replies.t(lang, "stock_changed"))  # R15
-        update["trace"] = step + update["trace"]
-        update["decision"] = None
-        return Command(goto=END if update.get("status") == "empty" else "await_approval",
-                       update=update)
+            return {"status": "placed", "order_id": result.order_id, "items": [], "cart": None,
+                    "reply": t("placed", order_id=result.order_id,
+                               total=replies.brl(result.total_cents))}
+        # Stock dropped since the customer saw the cart: nothing was written. Re-price it.
+        items = [ResolvedItem(**i) for i in state.get("items") or []]
+        return {"status": "stock_changed", "reply": t("stock_changed"),
+                "cart": build_cart(items, products()).model_dump()}
 
-    g = StateGraph(OrderState)
-    g.add_node("parse", parse_node)
-    g.add_node("match_stock", match_stock_node)
-    g.add_node("clarify", clarify_node, destinations=("clarify", "build_cart"))
-    g.add_node("build_cart", build_cart_node)
-    g.add_node("await_approval", await_approval_node, destinations=("await_approval", "commit"))
-    g.add_node("commit", commit_node, destinations=("await_approval", END))
-    g.add_edge(START, "parse")
-    g.add_conditional_edges("parse", after_parse, ["match_stock", END])
-    g.add_conditional_edges("match_stock", after_match, ["clarify", "build_cart"])
-    g.add_conditional_edges("build_cart", after_cart, ["await_approval", END])
+    def clear_cart(state: CartState):
+        return {"items": [], "cart": None, "status": "cleared", "reply": t("cleared")}
+
+    g = StateGraph(CartState)
+    g.add_node("parse", parse)
+    g.add_node("find_products", find_products)
+    g.add_node("ask", ask, destinations=("ask", "update_cart"))
+    g.add_node("update_cart", update_cart)
+    g.add_node("place_order", place_order)
+    g.add_node("clear_cart", clear_cart)
+    g.add_conditional_edges(START, route, ["parse", "place_order", "clear_cart"])
+    g.add_conditional_edges("parse", after_parse, ["find_products", END])
+    g.add_conditional_edges("find_products", after_find, ["ask", "update_cart"])
+    for node in ("update_cart", "place_order", "clear_cart"):
+        g.add_edge(node, END)
     return g.compile(checkpointer=checkpointer or InMemorySaver())
+
+
+# ---- helpers (pure functions over plain dicts) ----------------------------------------------
+
+def _same_line(item: dict, sku: str | None, text: str) -> bool:
+    """Is this draft item the cart line an edit points at? Unknown products have no SKU, so
+    they are found by the words the customer typed."""
+    if sku:
+        return item["sku"] == sku
+    return item["sku"] is None and normalize(item["product_text"]) == normalize(text)
+
+
+def _find_in_cart(text: str, items: list[dict], prods: dict[str, Product]) -> MatchResult:
+    skus = list(dict.fromkeys(i["sku"] for i in items if i["sku"]))
+    m = match(text, [prods[s] for s in skus]) if skus else MatchResult(status="unknown")
+    if m.status != "unknown":
+        return m
+    if any(_same_line(i, None, text) for i in items):  # e.g. "remove the heineken"
+        return MatchResult(status="matched")
+    return MatchResult(status="unknown")
+
+
+def _answer(edit: dict, answer: str, attempts: int, prods: dict[str, Product]) -> dict:
+    """Resolve one open question from the customer's answer: an option number or words."""
+    cands = edit["candidates"]
+    if answer == "cancel":
+        return {"status": "dropped"}
+    if answer.isdigit() and 1 <= int(answer) <= len(cands):
+        return {"status": "matched", "sku": cands[int(answer) - 1], "candidates": []}
+    m = resolve_among(answer, cands, prods)
+    if m.status == "matched":
+        return {"status": "matched", "sku": m.sku, "candidates": []}
+    if attempts >= MAX_ASKS:
+        return {"status": "not_added" if edit["action"] == "add" else "unclear"}
+    return {}
+
+
+def _units(item: dict, prods: dict[str, Product]) -> int:
+    p = prods.get(item["sku"]) if item["sku"] else None
+    if not p or item["status"] != "matched":
+        return 0
+    q = item["quantity"]
+    if q <= 0 or q != int(q):
+        return 0
+    return int(q) if item["unit"] == "unit" else int(q) * p.units_per_pack
+
+
+def _apply(e: dict, items: list[dict], prods: dict[str, Product]) -> dict:
+    """Apply one edit to the draft `items` (in place). Returns what happened, for the reply."""
+    sku, text = e.get("sku"), e["product_text"]
+    if e["status"] in ("dropped", "unclear", "not_in_cart") or \
+            (e["action"] != "add" and e["status"] == "unknown"):
+        return {"kind": e["status"] if e["status"] != "unknown" else "not_in_cart", "text": text}
+
+    def requested() -> int:
+        return sum(_units(i, prods) for i in items if _same_line(i, sku, text))
+
+    before = requested()
+    new = {"product_text": text, "quantity": e["quantity"], "unit": e["unit"], "sku": sku,
+           "status": e["status"] if e["status"] in ("unknown", "not_added") else "matched"}
+    if e["action"] == "remove":
+        items[:] = [i for i in items if not _same_line(i, sku, text)]
+        return {"kind": "removed", "sku": sku, "text": text}
+    if e["action"] == "set" and any(_same_line(i, sku, text) for i in items):
+        first = next(n for n, i in enumerate(items) if _same_line(i, sku, text))
+        if not sku:  # a line found by its words (unknown / not_added) keeps what it was
+            new["status"] = items[first]["status"]
+        items[:] = [i for n, i in enumerate(items) if n == first or not _same_line(i, sku, text)]
+        items[first] = new
+    else:  # add (a repeated product merges into one cart line, R12)
+        items.append(new)
+    return {"kind": "changed" if before else "added", "sku": sku, "text": text,
+            "before": before, "after": requested()}
+
+
+def _describe(events: list[dict], cart: Cart, prods: dict[str, Product]) -> str:
+    """The chat reply for one message: what changed, then any problem on a touched line."""
+    lines_by_sku = {ln.sku: ln for ln in cart.lines if ln.sku}
+    lines_by_text = {normalize(ln.name): ln for ln in cart.lines if not ln.sku}
+    out, explained = [], set()
+    for ev in events:
+        kind, sku = ev["kind"], ev.get("sku")
+        p = prods.get(sku) if sku else None
+        if kind == "removed":
+            out.append(t("removed", name=p.name if p else ev["text"]))
+            continue
+        if kind in ("dropped", "unclear", "not_in_cart"):
+            out.append(t(kind, text=ev["text"]))
+            continue
+        line = lines_by_sku.get(sku) if sku else lines_by_text.get(normalize(ev["text"]))
+        if line is None:
+            continue
+        problem = replies.line_problem(line, p)
+        if problem:
+            if id(line) not in explained:  # say each problem once per message
+                out.append(problem)
+                explained.add(id(line))
+        elif kind == "added":
+            out.append(t("added", qty=replies.qty_text(ev["after"], p), name=p.name))
+        else:
+            out.append(t("changed", name=p.name, old=replies.qty_text(ev["before"], p),
+                         new=replies.qty_text(ev["after"], p)))
+    return "\n\n".join(out) or t("no_items")

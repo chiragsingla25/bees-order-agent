@@ -1,4 +1,4 @@
-"""Phase 3 criterion: the session limit (LLM messages only) and the daily API-call cap."""
+"""R16: the session limit (LLM messages only, 40 by default) and the daily API-call cap."""
 
 from datetime import date
 
@@ -13,7 +13,7 @@ class Counting:
         self.calls = 0
         self.daily = daily
 
-    def __call__(self, msg):
+    def __call__(self, msg, cart=()):
         self.calls += 1
         if self.daily:
             self.daily.record()
@@ -21,19 +21,20 @@ class Counting:
             items = [ParsedItem(product_text="guaraná", quantity=1, unit="pack")]
         else:
             items = [ParsedItem(product_text="skol lata", quantity=1, unit="pack")]
-        return ParseResult(ParsedOrder(intent="order", language="pt", items=items), "stub", 1)
+        return ParseResult(ParsedOrder(intent="order", items=items), "stub", 1)
 
 
-def test_21st_llm_message_is_refused_without_calling_the_llm(conn):
+def test_41st_llm_message_is_refused_without_calling_the_llm(conn):
     parser = Counting()
-    agent = OrderAgent(conn, parser, limits=Limits(session_limit=20, daily=DailyCallCap(10_000)))
+    agent = OrderAgent(conn, parser, limits=Limits(daily=DailyCallCap(10_000)))
+    assert agent.limits.session_limit == 40  # Phase 6: raised from 20
     s = Session()
-    for _ in range(20):
+    for _ in range(40):
         assert agent.handle(s, "order").status == "cart"
-        agent.cancel(s)
+        agent.clear(s)
     t = agent.handle(s, "order")
-    assert t.status == "limit_session" and "limite de 20" in t.reply
-    assert parser.calls == 20
+    assert t.status == "limit_session" and "limit of 40" in t.reply
+    assert parser.calls == 40
     assert agent.handle(Session(), "order").status == "cart"  # other sessions unaffected
 
 
@@ -43,8 +44,9 @@ def test_clarify_answers_and_buttons_do_not_count(conn):
     agent.handle(s, "amb")
     agent.handle(s, "sei la")  # re-ask, free
     agent.handle(s, "2L")  # answer, free
-    agent.handle(s, "typed while pending")  # reminder, free
-    agent.approve(s)
+    agent.place_order(s)  # button, free
+    agent.handle(s, "clear cart")  # typed clear, free
+    agent.clear(s)  # button, free
     assert s.llm_messages == 1
     assert agent.handle(s, "order").status == "cart"
 

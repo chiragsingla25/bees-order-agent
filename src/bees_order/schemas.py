@@ -1,22 +1,27 @@
 """Shared data types. Money is integer cents (BRL) everywhere; format only at display time."""
 
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 Unit = Literal["pack", "unit", "none"]
+Action = Literal["add", "set", "remove"]  # what a message does to the cart
 LineFlag = Literal["ok", "short", "unavailable", "over_cap", "invalid_qty", "not_added", "unknown"]
 
 
 class ParsedItem(BaseModel):
+    """One product mention in a message, as the LLM read it."""
+
     product_text: str
-    quantity: float
+    quantity: float = 0  # ignored for "remove"
     unit: Unit = "none"
+    action: Action = "add"
 
 
 class ParsedOrder(BaseModel):
+    """The LLM's whole output for one message."""
+
     intent: Literal["order", "off_topic", "data_request"]
-    language: Literal["pt", "en"] = "pt"
     items: list[ParsedItem] = Field(default_factory=list)
 
 
@@ -43,7 +48,8 @@ class MatchResult(BaseModel):
 
 
 class ResolvedItem(BaseModel):
-    """A parsed item after matching: what build_cart consumes."""
+    """A product the customer asked for, after matching. The session's draft cart is a list
+    of these; build_cart turns it into priced lines."""
 
     product_text: str
     quantity: float
@@ -79,10 +85,3 @@ class OrderResult(BaseModel):
     status: Literal["approved", "stock_changed", "empty"]
     order_id: int | None = None
     total_cents: int = 0
-
-
-class TraceStep(BaseModel):
-    step: str
-    input: Any = None
-    output: Any = None
-    ms: float = 0.0

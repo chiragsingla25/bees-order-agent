@@ -8,6 +8,10 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 load_dotenv()
 
+from bees_order.llm import require_key_for_tracing
+
+require_key_for_tracing()  # before any graph runs: no LangSmith key → nothing is sent
+
 import spaces
 
 from bees_order.ui import build_app, launch_kwargs

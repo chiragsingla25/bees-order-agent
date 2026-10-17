@@ -123,10 +123,11 @@ def test_user_stated_price_has_no_input_path(products):  # R9: price comes only 
     assert ln.unit_price_cents == 329
 
 
-def test_unit_shortage_worded_in_units(products):  # Phase 3 clarified
-    from bees_order.replies import cart_text
-    unit = build_cart([item("BOH-LT350", 60, unit="unit")], products)
-    assert "pediu 60 un, só temos 50 un" in cart_text("pt", unit, products)
-    pack = build_cart([item("BOH-LT350", 10)], products)
-    assert "pediu 10 cx, só temos 4 cx" in cart_text("pt", pack, products)
-    assert "only 50 units in stock" in cart_text("en", unit, products)
+def test_unit_shortage_worded_in_units(products):  # Phase 3 clarified, English since Phase 6
+    from bees_order.replies import line_problem
+    unit = build_cart([item("BOH-LT350", 60, unit="unit")], products).lines[0]
+    assert "Only 50 units of Bohemia Can 350 ml in stock (you asked for 60 units)" in \
+        line_problem(unit, products["BOH-LT350"])
+    pack = build_cart([item("BOH-LT350", 10)], products).lines[0]
+    assert "Only 4 cases of Bohemia Can 350 ml in stock (you asked for 10 cases)" in \
+        line_problem(pack, products["BOH-LT350"])

@@ -1,7 +1,7 @@
 [project]
 name = "bees-order-agent"
 version = "0.1.0"
-description = "PT/EN shorthand beverage orders -> stock-checked cart (LangGraph + OpenRouter + Gradio). Unofficial demo."
+description = "Order drinks by chat into a live, priced, stock-checked cart (LangGraph + OpenRouter + Gradio). Unofficial demo."
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "langgraph>=1.2,<2",
@@ -12,6 +12,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "pyyaml>=6.0",
     "spaces",
+    "langsmith>=0.14",
 ]
 
 [dependency-groups]
