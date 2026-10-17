@@ -108,16 +108,23 @@ uv run python app.py             # http://127.0.0.1:7860
 
 ```
 app.py                  # Space entry point (one no-op @spaces.GPU: ZeroGPU needs it)
+data/products.csv       # the 29-SKU synthetic catalog: names, packs, prices, starting stock
 src/bees_order/
-  agent.py              # OrderAgent: the one entry point for the UI and the eval
-  graph.py              # LangGraph pipeline: message / place order / clear
-  llm.py                # the one LLM call: schema, retry, fallback, spend log, tracing
-  matching.py cart.py   # deterministic matching, units, stock, caps, totals
-  db.py catalog.py      # SQLite store + 29-SKU synthetic catalog
-  replies.py            # every customer-facing sentence
-  ui.py theme.py        # Gradio page (chat, cart, products) and its look
+  domain/               # pure rules, no LLM / DB / UI
+    models.py           #   the shared data types
+    matching.py         #   text → product: aliases, fuzzy score, hard size filters
+    cart.py             #   units, stock, caps, totals, and add / set / remove on the draft
+  services/             # the only code that talks to the outside world
+    db.py               #   SQLite: loads the CSV, live stock, orders (one transaction)
+    llm.py              #   the one LLM call: schema, retry, fallback, spend log, tracing
+  workflow/             # wires rules and services together
+    graph.py            #   LangGraph pipeline: message / place order / clear
+    agent.py            #   OrderAgent (used by the UI and the eval) + rate limits
+  ui/                   # what the customer sees
+    replies.py          #   every word: chat sentences, labels, money format
+    page.py style.css   #   Gradio page (chat, cart, products) and its look
 evals/                  # answer key, runner, results
-tests/                  # one test per rule
+tests/                  # one file per layer, one test per rule
 ```
 
 ## Next steps (deliberately out of scope)

@@ -7,12 +7,12 @@ products already in this customer's cart, so it has nothing to leak and no way t
 import json
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import ValidationError
 
-from bees_order.schemas import ParsedOrder
+from bees_order.domain.models import ParsedOrder
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
 TIMEOUT_S = 10.0
@@ -118,7 +118,6 @@ class ParseResult:
     model: str
     attempts: int
     cost_usd: float = 0.0
-    errors: list[str] = field(default_factory=list)
 
 
 class OpenRouterParser:
@@ -169,7 +168,7 @@ class OpenRouterParser:
             content = resp.choices[0].message.content or ""
             try:
                 parsed = ParsedOrder.model_validate(json.loads(content))
-                return ParseResult(parsed, model, attempts, cost, errors)
+                return ParseResult(parsed, model, attempts, cost)
             except (json.JSONDecodeError, ValidationError) as exc:
                 errors.append(f"{model}: invalid output: {exc}"[:300])
                 if retried:

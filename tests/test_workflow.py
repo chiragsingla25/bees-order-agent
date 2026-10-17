@@ -1,24 +1,17 @@
-"""Phase 6 criteria for the chat cart, driven through OrderAgent with a stub parser.
+"""Workflow: the chat cart through OrderAgent with a stub parser (Phase 6 criteria),
+plus the rate limits (R16)."""
 
-The stub maps a message to a ParsedOrder, so these tests check what code does with a parse:
-matching, editing the draft cart, asking, placing and clearing. No network.
-"""
+from datetime import date
 
 import pytest
 
-from bees_order import db
-from bees_order.agent import OrderAgent, Session
-from bees_order.catalog import CATALOG
-from bees_order.llm import NotConfigured, ParseError, ParseResult
-from bees_order.schemas import ParsedItem, ParsedOrder
+from bees_order.domain.models import ParsedItem, ParsedOrder
+from bees_order.services import db
+from bees_order.services.llm import NotConfigured, ParseError
+from bees_order.workflow.agent import DailyCallCap, Limits, OrderAgent, Session
+from tests.conftest import StubParser, order, stock
 
-
-def order(*items):
-    """items: (product_text, quantity, unit) or (product_text, quantity, unit, action)."""
-    return ParsedOrder(intent="order", items=[
-        ParsedItem(product_text=i[0], quantity=i[1], unit=i[2], action=(i[3:] or ("add",))[0])
-        for i in items])
-
+# ---- from test_graph.py -------------------------------------------------------
 
 TABLE = {
     "brahma": order(("brahma lata", 3, "pack")),
@@ -46,33 +39,15 @@ TABLE = {
 }
 
 
-class StubParser:
-    def __init__(self):
-        self.calls = 0
-        self.carts = []  # the cart names the parser was shown, per call
-
-    def __call__(self, msg, cart=()):
-        self.calls += 1
-        self.carts.append(list(cart))
-        out = TABLE[msg]
-        if isinstance(out, Exception):
-            raise out
-        return ParseResult(out, "stub", 1)
-
-
 @pytest.fixture
 def agent(conn):
-    return OrderAgent(conn, StubParser())
+    return OrderAgent(conn, StubParser(TABLE))
 
 
 def lines(turn):
     """The cart as {sku-or-name: (units, flag)}."""
     return {ln["sku"] or ln["name"]: (ln["units"], ln["flag"])
             for ln in (turn.cart or {}).get("lines", [])}
-
-
-def stock(conn, sku):
-    return conn.execute("SELECT stock FROM products WHERE sku = ?", (sku,)).fetchone()[0]
 
 
 # ---- one LLM call per message, and none for answers or buttons -------------------------------
@@ -326,8 +301,8 @@ def test_typing_place_the_order_never_commits(agent, conn):
 
 # ---- English, refusals, failures, isolation ---------------------------------------------------
 
-def test_product_names_and_pack_words_are_english():
-    names = " ".join(p["name"] for p in CATALOG)
+def test_product_names_and_pack_words_are_english(products):
+    names = " ".join(p.name for p in products.values())
     for pt in ("Lata", "Latão", "Litrão", "Garrafa", "Laranja", "Limão", "sem Gás"):
         assert pt not in names
 
@@ -362,3 +337,56 @@ def test_sessions_do_not_share_a_cart_or_a_question(agent):
     assert lines(agent.handle(a, "skol")) == {"BRA-CHP-LT350": (36, "ok"), "SKL-LT350": (24, "ok")}
     assert agent.place_order(b).status == "question_open"
     assert agent.cart(b) is None
+
+
+# ---- from test_guards.py ------------------------------------------------------
+
+LIMIT_TABLE = {"order": order(("skol lata", 1, "pack")), "amb": order(("guaraná", 1, "pack"))}
+
+
+def test_41st_llm_message_is_refused_without_calling_the_llm(conn):
+    parser = StubParser(LIMIT_TABLE)
+    agent = OrderAgent(conn, parser, limits=Limits(daily=DailyCallCap(10_000)))
+    assert agent.limits.session_limit == 40  # Phase 6: raised from 20
+    s = Session()
+    for _ in range(40):
+        assert agent.handle(s, "order").status == "cart"
+        agent.clear(s)
+    t = agent.handle(s, "order")
+    assert t.status == "limit_session" and "limit of 40" in t.reply
+    assert parser.calls == 40
+    assert agent.handle(Session(), "order").status == "cart"  # other sessions unaffected
+
+
+def test_clarify_answers_and_buttons_do_not_count(conn):
+    agent = OrderAgent(conn, StubParser(LIMIT_TABLE), limits=Limits(session_limit=2, daily=DailyCallCap(99)))
+    s = Session()
+    agent.handle(s, "amb")
+    agent.handle(s, "sei la")  # re-ask, free
+    agent.handle(s, "2L")  # answer, free
+    agent.place_order(s)  # button, free
+    agent.handle(s, "clear cart")  # typed clear, free
+    agent.clear(s)  # button, free
+    assert s.llm_messages == 1
+    assert agent.handle(s, "order").status == "cart"
+
+
+def test_daily_cap_blocks_every_session_and_rolls_over(conn):
+    day = [date(2026, 10, 17)]
+    daily = DailyCallCap(cap=3, today=lambda: day[0])
+    parser = StubParser(LIMIT_TABLE, on_call=daily.record)
+    agent = OrderAgent(conn, parser, limits=Limits(session_limit=100, daily=daily))
+    for _ in range(3):
+        s = Session()
+        assert agent.handle(s, "order").status == "cart"
+    t = agent.handle(Session(), "order")
+    assert t.status == "limit_daily" and parser.calls == 3
+    day[0] = date(2026, 10, 18)
+    assert agent.handle(Session(), "order").status == "cart"
+
+
+def test_empty_message_is_ignored(conn):
+    parser = StubParser(LIMIT_TABLE)
+    agent = OrderAgent(conn, parser, limits=Limits())
+    assert agent.handle(Session(), "   ").status == "ignored"
+    assert parser.calls == 0

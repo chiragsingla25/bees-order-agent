@@ -16,7 +16,7 @@ import unicodedata
 
 from rapidfuzz import fuzz
 
-from bees_order.schemas import MatchResult, Product
+from bees_order.domain.models import MatchResult, Product
 
 HIGH = 88.0  # single candidate at or above this → matched
 LOW = 75.0  # below this → unknown
@@ -134,8 +134,7 @@ def match(text: str, products: dict[str, Product] | list[Product]) -> MatchResul
     owners = [p for p in plist
               if norm and p.variant is None and norm in {normalize(a) for a in p.aliases}]
     if len(owners) == 1:
-        return MatchResult(status="matched", sku=owners[0].sku, candidates=[owners[0].sku],
-                           score=100)
+        return MatchResult(status="matched", sku=owners[0].sku, candidates=[owners[0].sku])
 
     name, container, size_ml, variant = extract(text)
     if not name and not variant:
@@ -151,11 +150,11 @@ def match(text: str, products: dict[str, Product] | list[Product]) -> MatchResul
 
     best = max(s for s, _ in scored)
     if best < LOW:
-        return MatchResult(status="unknown", score=best)
+        return MatchResult(status="unknown")
     tied = [sku for s, sku in sorted(scored, reverse=True) if s >= best - MARGIN]
     if len(tied) == 1 and best >= HIGH:
-        return MatchResult(status="matched", sku=tied[0], candidates=tied, score=best)
-    return MatchResult(status="ambiguous", candidates=tied, score=best)
+        return MatchResult(status="matched", sku=tied[0], candidates=tied)
+    return MatchResult(status="ambiguous", candidates=tied)
 
 
 def resolve_among(answer: str, candidates: list[str],
@@ -168,8 +167,38 @@ def resolve_among(answer: str, candidates: list[str],
             and (size_ml is None or p.size_ml == size_ml)
             and (variant is None or p.variant == variant)]
     if (container or size_ml or variant) and len(hits) == 1:
-        return MatchResult(status="matched", sku=hits[0], candidates=hits, score=100)
+        return MatchResult(status="matched", sku=hits[0], candidates=hits)
     result = match(answer, subset)
     if result.status == "matched":
         return result
     return MatchResult(status="ambiguous", candidates=hits or candidates)
+
+
+_SPLIT_RE = re.compile(r"\s*(?:,|;|\n|\be\b|\band\b)\s*")
+
+
+def split_answers(answer: str, n: int) -> list[str]:
+    """One message may answer several questions in order ("2L and lata"). If the parts don't
+    line up, the whole answer applies to every question, except a bare number: it can't say
+    which question it answers, so every question is asked again."""
+    parts = [p for p in _SPLIT_RE.split(answer) if p]
+    if len(parts) == n:
+        return parts
+    return ["" if n > 1 and answer.isdigit() else answer] * n
+
+
+def resolve_answer(question: dict, answer: str, attempts: int,
+                   products: dict[str, Product], max_attempts: int = 2) -> dict:
+    """R8: resolve one open question from the customer's answer, an option number or words.
+    Returns the fields to update on that edit; {} means "still unclear, ask again"."""
+    cands = question["candidates"]
+    if answer == "cancel":
+        return {"status": "dropped"}
+    if answer.isdigit() and 1 <= int(answer) <= len(cands):
+        return {"status": "matched", "sku": cands[int(answer) - 1], "candidates": []}
+    m = resolve_among(answer, cands, products)
+    if m.status == "matched":
+        return {"status": "matched", "sku": m.sku, "candidates": []}
+    if attempts >= max_attempts:  # give up: an add becomes a "couldn't tell which" line
+        return {"status": "not_added" if question["action"] == "add" else "unclear"}
+    return {}

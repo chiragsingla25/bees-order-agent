@@ -3,25 +3,48 @@ All ordering logic lives in OrderAgent. This file only renders what the agent re
 
 import os
 from html import escape
+from pathlib import Path
 
 import gradio as gr
 
-from bees_order import db, theme
-from bees_order.agent import OrderAgent, Session, Turn
-from bees_order.guards import DailyCallCap, Limits
-from bees_order.llm import OpenRouterParser
-from bees_order.replies import brl, pack_word, qty_text
-from bees_order.schemas import Cart, CartLine, Product
+from bees_order.domain.models import Cart, CartLine, Product
+from bees_order.services import db
+from bees_order.services.llm import OpenRouterParser
+from bees_order.ui.replies import LABELS, brl, pack_word, qty_text
+from bees_order.workflow.agent import DailyCallCap, Limits, OrderAgent, Session, Turn
+
+CSS = (Path(__file__).parent / "style.css").read_text()
 
 WELCOME = ("Hi! Tell me what you need, the way you'd text your sales rep. For example: "
            "*“10 cases of Brahma cans and 6 packs of Guaraná 2L”*.\n\n"
            "Prices and stock are in the **Products** tab.")
-BEER_BRANDS = {"brahma", "skol", "antarctica", "original", "budweiser", "stella artois",
-               "corona", "spaten", "bohemia", "becks", "michelob"}
-# The short label on a cart line that won't be (fully) ordered.
-PROBLEM_LABELS = {"unavailable": "Out of stock", "unknown": "Not in our catalog",
-                  "over_cap": "Over 100 per item", "invalid_qty": "Invalid quantity",
-                  "not_added": "Couldn't tell which"}
+HEAD = ('<link rel="preconnect" href="https://fonts.googleapis.com">'
+        '<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700'
+        '&display=swap" rel="stylesheet">'
+        # Phone padding lives here, not in CSS: Gradio prefixes every rule inside an @media
+        # block with ".gradio-container … .contain", so the outer container can't be reached.
+        '<style>@media (max-width: 640px) { .gradio-container { padding: 0 12px !important; }'
+        ' .gradio-container .main { padding: 0 !important; } }</style>')
+
+
+def topbar(github_url: str) -> str:
+    return (
+        '<div id="topbar"><div class="brand"><span class="mark"><svg viewBox="0 0 24 24" '
+        'fill="none" stroke="#0F0F10" stroke-width="2" stroke-linejoin="round"><path d="M12 2.5l8.2 '
+        '4.75v9.5L12 21.5l-8.2-4.75v-9.5z"/><path d="M8.5 12.5l2.4 2.4 4.6-5" stroke-linecap="round"/>'
+        '</svg></span><div><div class="title">BEES Order Agent<span class="ai">AI</span></div>'
+        '<div class="sub">Order drinks by chat · priced and stock-checked</div></div></div>'
+        '<div class="right"><span class="chip live">Live stock</span>'
+        '<span class="chip">Unofficial demo · synthetic data</span>'
+        f'<a class="icon" href="{escape(github_url)}" target="_blank" title="GitHub">'
+        '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5a11.5 '
+        '11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.33-1.29-1.69'
+        '-1.29-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.71 1.26 3.37.96.1-.75'
+        '.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.68 0-1.25.45-2.28 1.19-3.08-.12-.29-.52-1.46.11-'
+        '3.04 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.58.23 2.75'
+        '.11 3.04.74.8 1.19 1.83 1.19 3.08 0 4.41-2.69 5.38-5.26 5.67.41.36.78 1.06.78 2.14v3.17c0 '
+        '.31.21.67.8.56A11.5 11.5 0 0 0 12 .5z"/></svg></a></div></div>')
+
 
 
 # ---- HTML for the side panel ------------------------------------------------------------------
@@ -72,7 +95,7 @@ def _cart_line(ln: CartLine, p: Product | None, changed: bool = False) -> str:
             else f"{ln.requested_units} units"
         pill = f"Only {ln.available} in stock · you asked for {asked}"
     elif ln.flag != "ok":
-        kind, pill, amount = "err", PROBLEM_LABELS[ln.flag], "—"
+        kind, pill, amount = "err", LABELS[ln.flag], "—"
     pill_html = f'<div class="pill">{pill}</div>' if pill else ""
     return (f'<div class="line {kind}"><div><div class="name">{name}</div>'
             f'<div class="meta">{meta}</div>{pill_html}</div>'
@@ -86,7 +109,7 @@ def receipt_html(order_id: int, total: str) -> str:
 
 def products_html(products: dict[str, Product], query: str | None = "") -> str:
     q = (query or "").strip().lower()  # Gradio sends None for an untouched search box
-    groups: dict[str, list[str]] = {"Beer": [], "Soft drinks & water": []}
+    groups: dict[str, list[str]] = {}  # category → rows, in CSV order
     for p in products.values():
         if q and q not in p.name.lower():
             continue
@@ -102,7 +125,7 @@ def products_html(products: dict[str, Product], query: str | None = "") -> str:
                f'{brl(p.unit_price_cents)}/unit</div>{pill}</div>'
                f'<div class="amt num">{brl(p.unit_price_cents * p.units_per_pack)}'
                f'<div class="meta per">per {pack_word(p)}</div></div></div>')
-        groups["Beer" if p.brand in BEER_BRANDS else "Soft drinks & water"].append(row)
+        groups.setdefault(p.category, []).append(row)
     body = "".join(f'<div class="group">{g}</div>{"".join(rows)}'
                    for g, rows in groups.items() if rows)
     return (f'<div class="card"><div class="card-head"><span class="t">Products</span>'
@@ -170,7 +193,7 @@ def build_app(agent: OrderAgent | None = None) -> gr.Blocks:
     with gr.Blocks(title="BEES Order Agent") as demo:
         sess = gr.State(None)
         typed = gr.State("")
-        gr.HTML(theme.topbar(os.getenv("GITHUB_URL", "https://github.com/")))
+        gr.HTML(topbar(os.getenv("GITHUB_URL", "https://github.com/")))
         with gr.Row(equal_height=False):
             with gr.Column(scale=3, min_width=300, elem_id="chat-card"):
                 chat = gr.Chatbot(value=[{"role": "assistant", "content": WELCOME}],
@@ -203,4 +226,4 @@ def build_app(agent: OrderAgent | None = None) -> gr.Blocks:
 
 def launch_kwargs() -> dict:
     """Gradio 6 takes styling at launch(), not in Blocks()."""
-    return {"css": theme.CSS, "head": theme.HEAD, "theme": gr.themes.Base(), "footer_links": []}
+    return {"css": CSS, "head": HEAD, "theme": gr.themes.Base(), "footer_links": []}

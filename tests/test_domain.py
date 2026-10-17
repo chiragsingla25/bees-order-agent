@@ -1,8 +1,92 @@
-"""Phase 1 criteria for build_cart: R1–R4, R5, R6, R9–R12, plus the empty / negative failure case."""
+"""Domain rules (pure code, no network): matching (R7, R8) and the cart (R1–R12)."""
 
-from bees_order.cart import build_cart
-from bees_order.schemas import ResolvedItem
+import pytest
 
+from bees_order.domain.cart import build_cart
+from bees_order.domain.matching import extract, match, resolve_among
+from bees_order.domain.models import ResolvedItem
+
+# ---- from test_matching.py ----------------------------------------------------
+
+@pytest.mark.parametrize(
+    ("text", "sku"),
+    [
+        ("brahma lata", "BRA-CHP-LT350"),  # R7: base SKU, no variant word
+        ("brahma latão", "BRA-CHP-LTA473"),  # R7: latão never matches lata
+        ("Brahma LATAO", "BRA-CHP-LTA473"),
+        ("brahminha", "BRA-CHP-LT350"),  # R7: alias
+        ("guaraná zero", "GUA-ZR-LT350"),  # clarified: variant word selects variant
+        ("guaraná 2L", "GUA-PET2L"),
+        ("guarana 2 litros", "GUA-PET2L"),
+        ("skol cans", "SKL-LT350"),  # EN container word
+        ("brama lata", "BRA-CHP-LT350"),  # typo still matches
+        ("brahma 600", "BRA-CHP-GF600"),  # bare size number
+        ("duplo malte lata", "BRA-DM-LT350"),  # variant with no brand word
+        ("guaraná antarctica lata", "GUA-LT350"),  # full name beats a subset key
+        ("budweiser long neck", "BUD-LN330"),
+    ],
+)
+def test_matched(products, text, sku):
+    r = match(text, products)
+    assert r.status == "matched", r
+    assert r.sku == sku
+
+
+@pytest.mark.parametrize("text", ["heineken", "coca cola", "itaipava lata", "lata", ""])
+def test_unknown_never_invents_a_sku(products, text):  # R6 / R7
+    r = match(text, products)
+    assert r.status == "unknown"
+    assert r.sku is None
+
+
+def test_guarana_is_ambiguous_between_exactly_the_two_regular_skus(products):  # R7, R8
+    r = match("guaraná", products)
+    assert r.status == "ambiguous"
+    assert set(r.candidates) == {"GUA-LT350", "GUA-PET2L"}
+
+
+def test_brand_only_skol_is_ambiguous(products):  # clarified: no default container
+    r = match("skol", products)
+    assert r.status == "ambiguous"
+    assert set(r.candidates) == {"SKL-LT350", "SKL-LTA473", "SKL-LTR1L"}
+
+
+def test_brahma_lata_never_offers_variants(products):  # clarified: variants need the word
+    assert "BRA-ZR-LT350" not in match("brahma", products).candidates
+    assert "BRA-DM-LT350" not in match("brahma", products).candidates
+
+
+def test_lata_and_latao_never_cross(products):  # R7 near-collision, both directions
+    for text in ["skol lata", "skol latas", "skol latinha"]:
+        assert match(text, products).sku == "SKL-LT350"
+    for text in ["skol latão", "skol latoes", "skol tall can"]:
+        assert match(text, products).sku == "SKL-LTA473"
+
+
+def test_extract_strips_pack_words_and_reads_sizes():
+    assert extract("cx de guaraná 2 L") == ("guarana", None, 2000, None)
+    assert extract("fardos de Guaraná Zero lata") == ("guarana", "lata", None, "zero")
+
+
+def test_clarification_answer_resolves_only_among_offered(products):  # R8
+    cands = ["GUA-LT350", "GUA-PET2L"]
+    assert resolve_among("2L", cands, products).sku == "GUA-PET2L"
+    assert resolve_among("a lata", cands, products).sku == "GUA-LT350"
+    assert resolve_among("350 ml", cands, products).sku == "GUA-LT350"
+    # an answer naming another product doesn't escape the candidate set
+    r = resolve_among("heineken", cands, products)
+    assert r.status == "ambiguous"
+    assert set(r.candidates) == set(cands)
+
+
+def test_com_gas_is_a_hard_filter(products):  # Phase 3 clarified
+    assert match("água com gás", products).status == "unknown"
+    assert match("sparkling water", products).status == "unknown"
+    assert match("água", products).sku == "AMA-PET500"
+    assert match("água sem gás", products).sku == "AMA-PET500"
+
+
+# ---- from test_cart.py --------------------------------------------------------
 
 def item(sku, qty, unit="pack", text=None, status="matched"):
     return ResolvedItem(product_text=text or sku or "?", quantity=qty, unit=unit, sku=sku,
@@ -72,7 +156,6 @@ def test_r9_total_is_sum_of_billable_lines(products):
     cart = build_cart([item("SKL-LT350", 2), item("GUA-PET2L", 1), item("SPA-LT350", 1)],
                       products)
     assert cart.total_cents == 24 * 309 + 6 * 849
-    assert cart.currency == "BRL"
 
 
 def test_r10_over_cap_refused_rest_built(products):
@@ -124,7 +207,7 @@ def test_user_stated_price_has_no_input_path(products):  # R9: price comes only 
 
 
 def test_unit_shortage_worded_in_units(products):  # Phase 3 clarified, English since Phase 6
-    from bees_order.replies import line_problem
+    from bees_order.ui.replies import line_problem
     unit = build_cart([item("BOH-LT350", 60, unit="unit")], products).lines[0]
     assert "Only 50 units of Bohemia Can 350 ml in stock (you asked for 60 units)" in \
         line_problem(unit, products["BOH-LT350"])

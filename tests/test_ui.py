@@ -3,20 +3,15 @@ product list correctly. Unknown product names echo the customer's text, so they'
 
 import gradio as gr
 
-from bees_order.agent import OrderAgent
-from bees_order.cart import build_cart
-from bees_order.llm import ParseResult
-from bees_order.schemas import ParsedItem, ParsedOrder, ResolvedItem
-from bees_order.ui import build_app, cart_html, products_html
-
-
-def stub(msg, cart=()):
-    return ParseResult(ParsedOrder(intent="order", items=[
-        ParsedItem(product_text="brahma lata", quantity=3, unit="pack")]), "stub", 1)
+from bees_order.domain.cart import build_cart
+from bees_order.domain.models import ResolvedItem
+from bees_order.ui.page import build_app, cart_html, products_html
+from bees_order.workflow.agent import OrderAgent
+from tests.conftest import StubParser
 
 
 def test_app_builds_with_a_stub_agent(conn):
-    assert isinstance(build_app(OrderAgent(conn, stub)), gr.Blocks)
+    assert isinstance(build_app(OrderAgent(conn, StubParser({}))), gr.Blocks)
 
 
 def test_cart_html_escapes_user_text(products):
@@ -51,7 +46,7 @@ def test_products_html_lists_prices_and_stock_pills(products):
 
 
 def test_changed_lines_highlight_only_what_a_message_changed(products):  # Phase 7
-    from bees_order.ui import changed_lines
+    from bees_order.ui.page import changed_lines
 
     def cart(*items):
         return build_cart([ResolvedItem(product_text=s, quantity=q, unit="pack", sku=s)
@@ -66,10 +61,9 @@ def test_changed_lines_highlight_only_what_a_message_changed(products):  # Phase
 
 
 def test_page_chrome_and_header():  # Phase 7: no footer, Geist font, safe GitHub link
-    from bees_order import theme
-    from bees_order.ui import launch_kwargs
+    from bees_order.ui.page import launch_kwargs, topbar
 
     kw = launch_kwargs()
     assert kw["footer_links"] == [] and "Geist" in kw["head"] and "--accent: #FFD60A" in kw["css"]
-    bar = theme.topbar('https://github.com/x"><script>')
+    bar = topbar('https://github.com/x"><script>')
     assert "<script>" not in bar and "BEES Order Agent" in bar and "Unofficial demo" in bar

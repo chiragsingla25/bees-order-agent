@@ -1,4 +1,5 @@
-"""Shared data types. Money is integer cents (BRL) everywhere; format only at display time."""
+"""The data types every layer shares. Money is integer cents (BRL) everywhere; it is
+formatted only at display time."""
 
 from typing import Literal
 
@@ -26,8 +27,11 @@ class ParsedOrder(BaseModel):
 
 
 class Product(BaseModel):
+    """One row of data/products.csv, plus its live stock from SQLite."""
+
     sku: str
     name: str
+    category: str  # "Beer" | "Soft drinks & water" (the Products tab groups by it)
     brand: str
     line: str
     container: str  # lata | latao | litrao | garrafa | longneck | pet
@@ -44,7 +48,6 @@ class MatchResult(BaseModel):
     status: Literal["matched", "ambiguous", "unknown"]
     sku: str | None = None
     candidates: list[str] = Field(default_factory=list)
-    score: float = 0.0
 
 
 class ResolvedItem(BaseModel):
@@ -74,7 +77,6 @@ class CartLine(BaseModel):
 class Cart(BaseModel):
     lines: list[CartLine] = Field(default_factory=list)
     total_cents: int = 0
-    currency: str = "BRL"
 
     @property
     def billable(self) -> list[CartLine]:

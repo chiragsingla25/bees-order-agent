@@ -1,6 +1,8 @@
-"""Every customer-facing sentence. Code writes all replies; the LLM never does."""
+"""Every customer-facing word: chat sentences, cart labels, money and quantity formatting.
+Code writes all replies; the LLM never does."""
 
-from bees_order.schemas import CartLine, Product
+from bees_order.domain.matching import normalize
+from bees_order.domain.models import Cart, CartLine, Product
 
 PACK_WORDS = {"cx": "case", "fardo": "pack", "engradado": "crate"}
 
@@ -40,6 +42,12 @@ T = {
     "limit_session": "You've reached this demo's limit of {n} messages. Please reload later.",
     "limit_daily": "The demo has reached its daily usage limit. Please come back tomorrow.",
 }
+
+
+# The short label on a cart line that won't be (fully) ordered.
+LABELS = {"unavailable": "Out of stock", "unknown": "Not in our catalog",
+          "over_cap": "Over 100 per item", "invalid_qty": "Invalid quantity",
+          "not_added": "Couldn't tell which"}
 
 
 def t(key: str, **kw) -> str:
@@ -89,3 +97,34 @@ def clarify_text(questions: list[dict], products: dict[str, Product], retry: boo
         out.append(t("clarify", text=q["product_text"]))
         out += [f"{i}. {products[sku].name}" for i, sku in enumerate(q["candidates"], 1)]
     return "\n".join(out)
+
+
+def describe_changes(events: list[dict], cart: Cart, products: dict[str, Product]) -> str:
+    """The chat reply for one message: what changed (from cart.apply_edit's events), then
+    any problem on a line the message touched, each said once."""
+    by_sku = {ln.sku: ln for ln in cart.lines if ln.sku}
+    by_text = {normalize(ln.name): ln for ln in cart.lines if not ln.sku}
+    out, explained = [], set()
+    for ev in events:
+        kind, sku = ev["kind"], ev.get("sku")
+        p = products.get(sku) if sku else None
+        if kind == "removed":
+            out.append(t("removed", name=p.name if p else ev["text"]))
+            continue
+        if kind in ("dropped", "unclear", "not_in_cart"):
+            out.append(t(kind, text=ev["text"]))
+            continue
+        line = by_sku.get(sku) if sku else by_text.get(normalize(ev["text"]))
+        if line is None:
+            continue
+        problem = line_problem(line, p)
+        if problem:
+            if id(line) not in explained:
+                out.append(problem)
+                explained.add(id(line))
+        elif kind == "added":
+            out.append(t("added", qty=qty_text(ev["after"], p), name=p.name))
+        else:
+            out.append(t("changed", name=p.name, old=qty_text(ev["before"], p),
+                         new=qty_text(ev["after"], p)))
+    return "\n\n".join(out) or t("no_items")

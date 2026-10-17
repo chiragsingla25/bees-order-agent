@@ -1,0 +1,30 @@
+sku,name,category,brand,line,container,size_ml,variant,pack_type,units_per_pack,unit_price_cents,stock,aliases
+BRA-CHP-LT350,Brahma Chopp Can 350 ml,Beer,brahma,brahma chopp,lata,350,,cx,12,329,600,brahminha|brahma chope
+BRA-CHP-LTA473,Brahma Chopp Tall Can 473 ml,Beer,brahma,brahma chopp,latao,473,,cx,12,419,480,brahma chope
+BRA-CHP-LTR1L,Brahma Chopp Bottle 1 L,Beer,brahma,brahma chopp,litrao,1000,,engradado,12,799,360,brahma chope
+BRA-CHP-GF600,Brahma Chopp Bottle 600 ml,Beer,brahma,brahma chopp,garrafa,600,,engradado,24,549,480,brahma chope
+BRA-DM-LT350,Brahma Duplo Malte Can 350 ml,Beer,brahma,brahma duplo malte,lata,350,duplomalte,cx,12,399,360,
+BRA-ZR-LT350,Brahma Zero Can 350 ml,Beer,brahma,brahma zero,lata,350,zero,cx,12,359,240,
+SKL-LT350,Skol Can 350 ml,Beer,skol,skol pilsen,lata,350,,cx,12,309,1200,skolzinha
+SKL-LTA473,Skol Tall Can 473 ml,Beer,skol,skol pilsen,latao,473,,cx,12,399,600,
+SKL-LTR1L,Skol Bottle 1 L,Beer,skol,skol pilsen,litrao,1000,,engradado,12,749,360,
+ANT-PIL-LT350,Antarctica Pilsen Can 350 ml,Beer,antarctica,antarctica pilsen,lata,350,,cx,12,299,480,antartica
+ORI-GF600,Original Bottle 600 ml,Beer,original,antarctica original,garrafa,600,,engradado,24,699,240,originalzinha
+BUD-LT350,Budweiser Can 350 ml,Beer,budweiser,budweiser,lata,350,,cx,12,389,480,bud
+BUD-LN330,Budweiser Long Neck 330 ml,Beer,budweiser,budweiser,longneck,330,,cx,24,499,480,bud
+STE-LN330,Stella Artois Long Neck 330 ml,Beer,stella artois,stella artois,longneck,330,,cx,24,589,144,stella
+COR-LN330,Corona Long Neck 330 ml,Beer,corona,corona extra,longneck,330,,cx,24,649,480,coronita
+SPA-LT350,Spaten Can 350 ml,Beer,spaten,spaten munich,lata,350,,cx,12,429,0,
+BOH-LT350,Bohemia Can 350 ml,Beer,bohemia,bohemia pilsen,lata,350,,cx,12,379,50,
+BEC-LN330,Beck's Long Neck 330 ml,Beer,becks,becks,longneck,330,,cx,24,559,480,beck
+MIC-LN330,Michelob Ultra Long Neck 330 ml,Beer,michelob,michelob ultra,longneck,330,,cx,24,569,480,michelob ultra
+GUA-LT350,Guaraná Antarctica Can 350 ml,Soft drinks & water,guarana antarctica,guarana antarctica,lata,350,,fardo,12,279,720,guarana|guaranazinho
+GUA-PET2L,Guaraná Antarctica 2 L,Soft drinks & water,guarana antarctica,guarana antarctica,pet,2000,,fardo,6,849,24,guarana
+GUA-ZR-LT350,Guaraná Antarctica Zero Can 350 ml,Soft drinks & water,guarana antarctica,guarana antarctica zero,lata,350,zero,fardo,12,289,360,guarana
+PEP-LT350,Pepsi Can 350 ml,Soft drinks & water,pepsi,pepsi,lata,350,,fardo,12,289,480,
+PEP-PET2L,Pepsi 2 L,Soft drinks & water,pepsi,pepsi,pet,2000,,fardo,6,899,240,
+SUK-PET2L,Sukita Orange 2 L,Soft drinks & water,sukita,sukita laranja,pet,2000,,fardo,6,699,240,orange soda
+H2O-LIM-PET500,H2OH! Lemon 500 ml,Soft drinks & water,h2oh,h2oh limao,pet,500,,fardo,12,449,360,h2o|lemon water
+AMA-PET500,AMA Still Water 500 ml,Soft drinks & water,ama,agua ama,pet,500,,fardo,12,199,720,agua|water|agua mineral
+GAT-PET500,Gatorade 500 ml,Soft drinks & water,gatorade,gatorade,pet,500,,fardo,6,549,240,isotonico
+FUS-LT473,Fusion Energy Can 473 ml,Soft drinks & water,fusion,fusion energy,lata,473,,fardo,6,699,240,energetico|energy drink

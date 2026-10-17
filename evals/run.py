@@ -18,11 +18,11 @@ from pathlib import Path
 import yaml
 from dotenv import load_dotenv
 
-from bees_order import db
-from bees_order.agent import OrderAgent, Session
-from bees_order.cart import build_cart
-from bees_order.llm import OpenRouterParser, require_key_for_tracing
-from bees_order.schemas import ResolvedItem
+from bees_order.domain.cart import build_cart
+from bees_order.domain.models import ResolvedItem
+from bees_order.services import db
+from bees_order.services.llm import OpenRouterParser, require_key_for_tracing
+from bees_order.workflow.agent import OrderAgent, Session
 
 CASES = Path(__file__).with_name("cases.yaml")
 

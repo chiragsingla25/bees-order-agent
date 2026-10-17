@@ -1,22 +1,59 @@
 """OrderAgent: the one entry point that both the UI and the eval drive (same code path).
 
 A Session is one browser tab. It owns one graph thread, which keeps its draft cart. The
-agent adds what the graph can't know: the demo's rate limits, the lazy stock reset, and
-whether a question is waiting for an answer.
+agent adds what the graph can't know: the demo's rate limits (R16), the lazy stock reset
+(R17), and whether a question is waiting for an answer.
 """
 
+import os
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, date, datetime
 
 from langgraph.types import Command
 
-from bees_order import db
-from bees_order.graph import CANCEL_WORDS, build_graph
-from bees_order.guards import Limits
-from bees_order.matching import normalize
-from bees_order.replies import t
+from bees_order.domain.matching import normalize
+from bees_order.services import db
+from bees_order.ui.replies import t
+from bees_order.workflow.graph import CANCEL_WORDS, build_graph
+
+
+class DailyCallCap:
+    """R16: OpenRouter API calls per UTC day, across all sessions. The parser's on_call hook
+    records every call; the US$10 cap on the key is the last line behind this."""
+
+    def __init__(self, cap: int | None = None, today: Callable[[], date] | None = None):
+        self.cap = cap if cap is not None else int(os.getenv("DAILY_LLM_CALL_CAP", "2000"))
+        self._today = today or (lambda: datetime.now(UTC).date())
+        self._lock = threading.Lock()
+        self._day, self.count = self._today(), 0
+
+    def _roll(self) -> None:
+        if self._today() != self._day:
+            self._day, self.count = self._today(), 0
+
+    def record(self) -> None:
+        with self._lock:
+            self._roll()
+            self.count += 1
+
+    def exhausted(self) -> bool:
+        with self._lock:
+            self._roll()
+            return self.count >= self.cap
+
+
+@dataclass
+class Limits:
+    """R16: LLM messages per session (answers and buttons are free), plus the daily cap."""
+
+    session_limit: int = field(default_factory=lambda: int(os.getenv("SESSION_MESSAGE_LIMIT",
+                                                                       "40")))
+    daily: DailyCallCap = field(default_factory=DailyCallCap)
+
 
 # Values that belong to one call only; reset at the start of every new call.
 _FRESH = {"status": None, "reply": "", "edits": [], "order_id": None, "llm": None}
