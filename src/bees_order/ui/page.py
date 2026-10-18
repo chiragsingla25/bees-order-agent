@@ -24,7 +24,12 @@ HEAD = ('<link rel="preconnect" href="https://fonts.googleapis.com">'
         # Phone padding lives here, not in CSS: Gradio prefixes every rule inside an @media
         # block with ".gradio-container … .contain", so the outer container can't be reached.
         '<style>@media (max-width: 640px) { .gradio-container { padding: 0 12px !important; }'
-        ' .gradio-container .main { padding: 0 !important; } }</style>')
+        ' .gradio-container .main { padding: 0 !important; } }</style>'
+        # Always light: Gradio follows the device's dark mode unless the address says
+        # ?__theme=light, so add it before the app starts (a one-time redirect).
+        '<script>(() => { const u = new URL(location.href);'
+        ' if (!u.searchParams.has("__theme")) {'
+        ' u.searchParams.set("__theme", "light"); location.replace(u); } })();</script>')
 
 
 def topbar(github_url: str) -> str:
