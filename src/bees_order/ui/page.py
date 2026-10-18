@@ -25,10 +25,11 @@ HEAD = ('<link rel="preconnect" href="https://fonts.googleapis.com">'
         # block with ".gradio-container … .contain", so the outer container can't be reached.
         '<style>@media (max-width: 640px) { .gradio-container { padding: 0 12px !important; }'
         ' .gradio-container .main { padding: 0 !important; } }</style>'
-        # Always light: Gradio follows the device's dark mode unless the address says
-        # ?__theme=light, so add it before the app starts (a one-time redirect).
+        # Always light: Gradio picks dark from the device setting, or from ?__theme=dark, which
+        # huggingface.co adds for dark-theme visitors. So unless the address already says
+        # light, set it before the app starts (a one-time redirect).
         '<script>(() => { const u = new URL(location.href);'
-        ' if (!u.searchParams.has("__theme")) {'
+        ' if (u.searchParams.get("__theme") !== "light") {'
         ' u.searchParams.set("__theme", "light"); location.replace(u); } })();</script>')
 
 

@@ -66,6 +66,7 @@ def test_page_chrome_and_header():  # Phase 7: no footer, Geist font, safe GitHu
     kw = launch_kwargs()
     assert kw["footer_links"] == [] and "Geist" in kw["head"] and "--accent: #FFD60A" in kw["css"]
     # Always light (Chirag 2026-10-18): the head pins ?__theme=light; no dark palette is left.
+    assert 'get("__theme") !== "light"' in kw["head"]  # also overrides ?__theme=dark (HF)
     assert 'searchParams.set("__theme", "light")' in kw["head"] and ".dark" not in kw["css"]
     bar = topbar('https://github.com/x"><script>')
     assert "<script>" not in bar and "BEES Order Agent" in bar and "Unofficial demo" in bar
