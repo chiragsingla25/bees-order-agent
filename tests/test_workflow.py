@@ -1,17 +1,18 @@
 """Workflow: the chat cart through OrderAgent with a stub parser (Phase 6 criteria),
-plus the rate limits (R16)."""
+the rate limits (R16), and chat history + answered questions (Phase 9)."""
 
 from datetime import date
 
 import pytest
 
-from bees_order.domain.models import ParsedItem, ParsedOrder
+from bees_order.domain.models import ParsedItem, ParsedOrder, Question
 from bees_order.services import db
 from bees_order.services.llm import NotConfigured, ParseError
 from bees_order.workflow.agent import DailyCallCap, Limits, OrderAgent, Session
-from tests.conftest import StubParser, order, stock
+from tests.conftest import StubParser, info, order, stock
 
 # ---- from test_graph.py -------------------------------------------------------
+
 
 TABLE = {
     "brahma": order(("brahma lata", 3, "pack")),
@@ -30,10 +31,19 @@ TABLE = {
     "make guarana 4": order(("guaraná", 4, "pack", "set")),
     "no": order(("skol lata", 1, "pack")),  # if "no" ever reached the parser
     "poem": ParsedOrder(intent="off_topic"),
-    "leak": ParsedOrder(intent="data_request"),
+    "leak": ParsedOrder(intent="restricted"),
     "empty": ParsedOrder(intent="order"),
-    "mixed_leak": ParsedOrder(intent="data_request",
+    "mixed_leak": ParsedOrder(intent="restricted",
                               items=[ParsedItem(product_text="skol lata", quantity=2, unit="pack")]),
+    "q cart": info("cart"),
+    "q last": info("last_change"),
+    "q stella": info("product", "stella"),
+    "q guarana": info("product", "guaraná"),
+    "q heineken": info("product", "heineken"),
+    "q product?": info("product", ""),
+    "q what do you sell": info("none"),
+    "skol + total?": ParsedOrder(intent="order", question=Question(topic="cart"), items=[
+        ParsedItem(product_text="skol lata", quantity=2, unit="pack")]),
     "boom": ParseError("bad output twice"),
     "nokey": NotConfigured("no key"),
 }
@@ -390,3 +400,121 @@ def test_empty_message_is_ignored(conn):
     agent = OrderAgent(conn, parser, limits=Limits())
     assert agent.handle(Session(), "   ").status == "ignored"
     assert parser.calls == 0
+
+
+# ---- Phase 9: chat history and answered questions -------------------------------------------
+
+def test_parser_gets_the_chat_history_including_answers_and_buttons(agent):
+    s = Session()
+    q = agent.handle(s, "two").reply  # a question
+    wait = agent.place_order(s).reply  # refused while the question is open
+    a = agent.handle(s, "2L").reply  # its answer
+    placed = agent.place_order(s).reply
+    agent.handle(s, "brahma")
+    assert agent.parser.histories == [[], [
+        ("two", q), ("(tapped Place order)", wait), ("2L", a), ("(tapped Place order)", placed)]]
+    assert agent.parser.calls == 2  # still one LLM call per message, none for answers/buttons
+
+
+def test_history_is_capped_at_the_last_100_exchanges(agent):
+    s = Session()
+    for i in range(103):
+        agent.parser.table[f"m{i}"] = ParsedOrder(intent="off_topic")
+        agent.handle(s, f"m{i}")
+    agent.handle(s, "q cart")
+    last = agent.parser.histories[-1]
+    assert len(last) == 100 and last[0][0] == "m3" and last[-1][0] == "m102"
+
+
+def test_sessions_do_not_share_history(agent):
+    agent.handle(Session(), "brahma")
+    agent.handle(Session(), "q cart")
+    assert agent.parser.histories == [[], []]
+
+
+def test_cart_question_lists_every_line_and_the_total(agent, conn):
+    s = Session()
+    agent.handle(s, "brahma")
+    before = lines(agent.handle(s, "spaten+heineken"))
+    t = agent.handle(s, "q cart")
+    assert t.status == "answered" and lines(t) == before
+    assert t.reply == ("• 3 cases of Brahma Chopp Can 350 ml: R$ 118.44\n"
+                       "• 2 cases of Spaten Can 350 ml: Out of stock\n"
+                       "• heineken: Not in our catalog\n\nTotal: R$ 118.44.")
+    assert db.order_count(conn) == 0
+
+
+def test_cart_question_shows_a_short_line_as_short(agent):  # M6 review r1
+    s = Session()
+    agent.parser.table["stella 50"] = order(("stella", 50, "pack"))
+    agent.handle(s, "stella 50")  # 6 cases in stock
+    t = agent.handle(s, "q cart")
+    assert t.reply.startswith("• 6 cases of Stella Artois Long Neck 330 ml: R$ 848.16 "
+                              "(Only 6 in stock · you asked for 50 cases)")
+
+
+def test_last_change_ignores_messages_that_changed_nothing(agent, conn):  # M6 review r1
+    s = Session()
+    agent.handle(s, "brahma")
+    agent.handle(s, "drop pepsi")  # not in the cart: nothing changed
+    assert agent.handle(s, "q last").reply.startswith(
+        "Last change: Added 3 cases of Brahma Chopp Can 350 ml.")
+    conn.execute("UPDATE products SET stock = 12 WHERE sku = 'BRA-CHP-LT350'")
+    agent.place_order(s)  # stock dropped: the cart is re-priced, so the old change is stale
+    assert agent.handle(s, "q last").reply.startswith("• 1 case of Brahma Chopp Can 350 ml")
+
+
+def test_cart_question_on_an_empty_cart(agent):
+    assert agent.handle(Session(), "q cart").reply == "Your cart is empty. Tell me what you need."
+
+
+def test_last_change_names_what_the_last_message_did(agent):
+    s = Session()
+    agent.handle(s, "q last")  # nothing changed yet → answered like a cart question
+    assert agent.parser.calls == 1
+    agent.handle(s, "brahma")
+    agent.handle(s, "skol")
+    t = agent.handle(s, "q last")
+    assert t.status == "answered"
+    assert t.reply == "Last change: Added 2 cases of Skol Can 350 ml.\n\nTotal: R$ 192.60."
+    agent.place_order(s)
+    assert agent.handle(s, "q last").reply == "Your cart is empty. Tell me what you need."
+
+
+def test_product_question_answers_price_and_stock_from_the_db(agent, conn):
+    s = Session()
+    t = agent.handle(s, "q stella")
+    assert t.status == "answered" and t.cart is None
+    assert t.reply == ("Stella Artois Long Neck 330 ml: R$ 141.36 per case of 24 "
+                       "(R$ 5.89/unit) · Low · 6 cases.")
+    conn.execute("UPDATE products SET stock = 0 WHERE sku = 'STE-LN330'")
+    assert agent.handle(s, "q stella").reply.endswith("· Out of stock.")
+
+
+def test_ambiguous_product_question_lists_options_without_asking(agent):
+    s = Session()
+    t = agent.handle(s, "q guarana")
+    assert t.status == "answered" and not s.asking
+    first, *options = t.reply.split("\n")
+    assert first == "We have these guaraná options:" and len(options) >= 2
+    assert all(o.startswith("• Guaraná Antarctica") and "/unit" in o for o in options)
+
+
+def test_product_not_in_the_catalog(agent):
+    assert agent.handle(Session(), "q heineken").reply == "We don't carry “heineken”."
+
+
+@pytest.mark.parametrize("msg", ["q what do you sell", "q product?"])
+def test_other_questions_get_a_friendly_answer_not_a_refusal(agent, msg):
+    t = agent.handle(Session(), msg)
+    assert t.status == "answered" and t.reply.startswith("I can tell you what's in your cart")
+
+
+def test_restricted_is_still_refused(agent):
+    t = agent.handle(Session(), "leak")
+    assert t.status == "refused" and t.reply == "Sorry, I can't share that. I can help with your order."
+
+
+def test_an_order_with_a_question_is_processed_as_an_order(agent):  # R13
+    t = agent.handle(Session(), "skol + total?")
+    assert t.status == "cart" and lines(t) == {"SKL-LT350": (24, "ok")}

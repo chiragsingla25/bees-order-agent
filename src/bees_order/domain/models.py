@@ -19,11 +19,19 @@ class ParsedItem(BaseModel):
     action: Action = "add"
 
 
+class Question(BaseModel):
+    """What an info_request asks about. Code answers it from the cart and SQLite."""
+
+    topic: Literal["none", "cart", "last_change", "product"] = "none"
+    product_text: str = ""  # for "product": the product words, or the name it refers back to
+
+
 class ParsedOrder(BaseModel):
     """The LLM's whole output for one message."""
 
-    intent: Literal["order", "off_topic", "data_request"]
+    intent: Literal["order", "info_request", "restricted", "off_topic"]
     items: list[ParsedItem] = Field(default_factory=list)
+    question: Question = Field(default_factory=Question)
 
 
 class Product(BaseModel):

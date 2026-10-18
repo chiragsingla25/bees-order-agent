@@ -4,6 +4,7 @@ Each browser session has one graph thread, and the thread's state keeps that ses
 cart between messages. Every call to the graph does one of three things, chosen by `action`:
 
     message      parse (LLM) → find_products → [ask ⟲ interrupt] → update_cart
+                 (a question or refusal is answered in parse and ends there)
     place_order  place_order   (one SQLite transaction, R15)
     clear        clear_cart
 
@@ -23,10 +24,10 @@ from langgraph.types import Command, interrupt
 
 from bees_order.domain.cart import apply_edit, build_cart, find_in_cart
 from bees_order.domain.matching import match, normalize, resolve_answer, split_answers
-from bees_order.domain.models import Cart, Product, ResolvedItem
+from bees_order.domain.models import Cart, Product, Question, ResolvedItem
 from bees_order.services import db
 from bees_order.services.llm import NotConfigured, ParseError, ParseResult
-from bees_order.ui.replies import brl, clarify_text, describe_changes, t
+from bees_order.ui.replies import answer_text, brl, clarify_text, describe_changes, t
 
 CANCEL_WORDS = {"cancel", "clear", "clear cart", "start over", "never mind", "nevermind",
                 "cancelar", "cancela", "esquece", "deixa", "recomecar"}
@@ -39,9 +40,11 @@ class CartState(TypedDict, total=False):
     # Input for this call
     action: str  # "message" | "place_order" | "clear"
     message: str
+    history: list[list[str]]  # earlier [customer message, reply] pairs, oldest first
     # Kept between calls: the session's draft cart
     items: list[dict]  # ResolvedItem dumps: what the customer asked for, in order
     cart: dict | None  # Cart dump: the items priced against stock
+    last_change: str | None  # the reply that described the last cart change
     # Working values for this call
     edits: list[dict]  # the parsed items of this message, plus what they matched
     attempts: int  # answers tried for the open question
@@ -66,7 +69,7 @@ def build_graph(conn, parser: Callable[..., ParseResult], lock=None, checkpointe
     def parse(state: CartState):
         cart_names = [ln["name"] for ln in (state.get("cart") or {}).get("lines", [])]
         try:
-            result = parser(state["message"], cart_names)
+            result = parser(state["message"], cart_names, state.get("history") or [])
         except NotConfigured:
             return {"status": "not_configured", "reply": t("not_configured")}
         except ParseError:
@@ -75,13 +78,23 @@ def build_graph(conn, parser: Callable[..., ParseResult], lock=None, checkpointe
         update = {"edits": [it.model_dump() for it in parsed.items],
                   "llm": {"model": result.model, "attempts": result.attempts,
                           "cost_usd": result.cost_usd}}
-        # R13: items win. The refusal replies are only for messages with no items.
-        if not parsed.items:
-            key = {"off_topic": "refuse_off_topic", "data_request": "refuse_data"}.get(
-                parsed.intent, "no_items")
-            update |= {"status": "no_items" if key == "no_items" else "refused",
-                       "reply": t(key)}
-        return update
+        # R13: items win. Answers and refusals are only for messages with no items.
+        if parsed.items:
+            return update
+        if parsed.intent == "info_request":
+            return update | {"status": "answered", "reply": answer(parsed.question, state)}
+        key = {"off_topic": "refuse_off_topic", "restricted": "refuse_restricted"}.get(
+            parsed.intent, "no_items")
+        return update | {"status": "no_items" if key == "no_items" else "refused",
+                         "reply": t(key)}
+
+    def answer(q: Question, state: CartState) -> str:
+        """Code answers the customer's own question from the cart and SQLite (no LLM)."""
+        prods = products()
+        found = match(q.product_text, prods) \
+            if q.topic == "product" and q.product_text.strip() else None
+        cart = Cart(**state["cart"]) if state.get("cart") else None
+        return answer_text(q, found, cart, state.get("last_change"), prods)
 
     def after_parse(state: CartState) -> str:
         return END if state.get("status") else "find_products"
@@ -121,8 +134,11 @@ def build_graph(conn, parser: Callable[..., ParseResult], lock=None, checkpointe
         items = [dict(i) for i in state.get("items") or []]
         events = [apply_edit(e, items, prods) for e in state["edits"]]
         cart = build_cart([ResolvedItem(**i) for i in items], prods)
-        return {"items": items, "cart": cart.model_dump(), "status": "cart",
-                "reply": describe_changes(events, cart, prods), "edits": []}
+        reply = describe_changes(events, cart, prods)
+        # Only a message that changed the draft becomes the "last change".
+        changed = items != (state.get("items") or [])
+        return {"items": items, "cart": cart.model_dump(), "status": "cart", "reply": reply,
+                "last_change": reply if changed else state.get("last_change"), "edits": []}
 
     # ---- place_order and clear ------------------------------------------------------------
 
@@ -134,15 +150,17 @@ def build_graph(conn, parser: Callable[..., ParseResult], lock=None, checkpointe
             result = db.commit_order(conn, cart)  # re-checks stock first (R15)
         if result.status == "approved":
             return {"status": "placed", "order_id": result.order_id, "items": [], "cart": None,
+                    "last_change": None,
                     "reply": t("placed", order_id=result.order_id,
                                total=brl(result.total_cents))}
         # Stock dropped since the customer saw the cart: nothing was written. Re-price it.
         items = [ResolvedItem(**i) for i in state.get("items") or []]
-        return {"status": "stock_changed", "reply": t("stock_changed"),
+        return {"status": "stock_changed", "reply": t("stock_changed"), "last_change": None,
                 "cart": build_cart(items, products()).model_dump()}
 
     def clear_cart(state: CartState):
-        return {"items": [], "cart": None, "status": "cleared", "reply": t("cleared")}
+        return {"items": [], "cart": None, "last_change": None, "status": "cleared",
+                "reply": t("cleared")}
 
     g = StateGraph(CartState)
     g.add_node("parse", parse)

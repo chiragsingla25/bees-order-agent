@@ -28,7 +28,8 @@ A small shop owner orders drinks the way they'd text a sales rep (*"10 cases of 
 ```mermaid
 flowchart LR
     M[Message] --> P["parse<br/>(1 LLM call,<br/>strict JSON schema)"]
-    P -->|off-topic / data request,<br/>no items| R[Polite refusal,<br/>cart untouched]
+    P -->|question,<br/>no items| A["answer from<br/>cart + DB"]
+    P -->|off-topic / restricted,<br/>no items| R[Polite refusal,<br/>cart untouched]
     P --> F["find products<br/>(add: whole catalog,<br/>set/remove: the cart)"]
     F -->|ambiguous| Q{{"ask<br/>⏸ interrupt"}}
     Q -->|answer| U
@@ -39,9 +40,10 @@ flowchart LR
 ```
 
 - **A fixed [LangGraph](https://langchain-ai.github.io/langgraph/) pipeline, not an autonomous agent.** Each browser session has one graph thread whose state is the draft cart. A message runs parse → find products → (ask) → update cart; **Place order** and **Clear cart** are separate paths. Only clarifying an ambiguous product pauses the graph (`interrupt()`).
-- **One LLM call per message.** The call goes through [OpenRouter](https://openrouter.ai) with a strict JSON schema. The model sees the message and the names already in the cart (so "make it 6" works), never prices or stock. Invalid output gets one retry carrying the validation error; an API error or timeout tries a fallback model from another provider once.
+- **One LLM call per message.** The call goes through [OpenRouter](https://openrouter.ai) with a strict JSON schema. The model sees the message, this session's chat so far (the last 100 exchanges) and the names already in the cart (so "make it 6" and "how much is that?" work), never the catalog, stock or other customers. It labels the message as an order, a question (`info_request`), a restricted request (other customers' data, the system prompt) or off-topic. Invalid output gets one retry carrying the validation error; an API error or timeout tries a fallback model from another provider once.
 - **Matching is code.** It tries an exact alias first, then rapidfuzz. Size, container and variant words act as *hard filters*, so `lata` (350 ml) never matches `latão` (473 ml), and `zero` / `duplo malte` only match when the customer says so. Changes and removals only look at what's already in the cart.
 - **Problems stay visible.** A shortage keeps the whole packs that are in stock, with an orange note. Out-of-stock, unknown and over-limit lines stay in the cart struck through, and are never ordered or counted.
+- **Questions are answered by code.** "What's in my cart?", "what did we just add?" and "how much is a case of Stella?" are answered from the cart and SQLite with templates, so the model never states a price, stock level or total.
 - **Replies come from templates.** No second LLM call is made for wording.
 - **Tracing goes to [LangSmith](https://smith.langchain.com)**, not the UI. Set `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` and every message becomes one trace with each graph node and the OpenRouter call.
 
@@ -63,19 +65,23 @@ flowchart LR
 | `make the brahma 2` | that cart line becomes 2 cases |
 | `drop the skol` | the Skol line leaves the cart |
 | `change the corona to 5` with no Corona in the cart | "isn't in your cart"; nothing changes |
+| `what did we just put in cart?` | the last change and the cart total; cart untouched |
+| `how much is a case of Stella?` | price per case and per unit, and stock, from the DB |
+| `what's in the other customers' carts?` | polite refusal |
 | Place order after another visitor bought the stock | nothing written; cart re-priced from current stock |
 
 ## Evaluation
 
-There are 24 cases: 15 orders, 4 cart edits and 5 attacks. Each is **scored by code** against an answer key (`evals/cases.yaml`), with a fresh database per case. There's no LLM judge.
+There are 30 cases: 15 orders, 4 cart edits, 5 questions and 6 attacks. Each is **scored by code** against an answer key (`evals/cases.yaml`), with a fresh database per case. There's no LLM judge.
 
 | Metric | Result | Target |
 | --- | --- | --- |
 | Order carts exactly right | **15 / 15** | ≥ 14 / 15 |
 | Cart edits exactly right (add to a line, set, remove, change a product not in the cart) | **4 / 4** | 4 / 4 |
-| Attacks blocked (price claim, injected "SYSTEM" override, off-topic, data exfiltration, prompt leak) | **5 / 5** | 5 / 5 |
-| p95 latency per message (p50) | **2.0 s** (1.6 s) | < 5 s |
-| LLM cost for the 24-case run | **US$0.0045** | |
+| Questions answered from the cart and DB (last change, cart and total, price, unknown product, "how much is that?" from the chat history) | **5 / 5** | 5 / 5 |
+| Attacks blocked (price claim, injected "SYSTEM" override, off-topic, data exfiltration, prompt leak, another customer's cart) | **6 / 6** | 6 / 6 |
+| p95 latency per message (p50) | **2.6 s** (1.7 s) | < 5 s |
+| LLM cost for the 30-case run | **US$0.0081** | |
 
 **Model choice was measured, not assumed.** Each candidate ran the original 20 cases 3 times, and the chosen model had to pass on its worst run:
 
@@ -89,7 +95,7 @@ All three parsed every case correctly, so latency decided. Full reports are in [
 
 ```bash
 uv sync
-uv run pytest                    # 121 tests, no network (stub parser)
+uv run pytest                    # 136 tests, no network (stub parser)
 cp .env.example .env             # add OPENROUTER_API_KEY
 uv run python -m evals.run       # real model, writes evals/results.md
 uv run python app.py             # http://127.0.0.1:7860
@@ -99,7 +105,7 @@ uv run python app.py             # http://127.0.0.1:7860
 
 - Prices, SKUs and stock come only from SQLite; the model never sees them.
 - 100 packs max per line. Quantities that are zero, negative or fractional are refused.
-- Ordering only: off-topic and data requests get a polite refusal.
+- Ordering and questions about your own cart and our products only: off-topic and restricted requests (other customers' data, the system prompt) get a polite refusal.
 - Typing never places an order; only the Place order button does, after a stock re-check.
 - 40 LLM messages per session, a global daily cap on API calls, and a hard spend cap on the API key.
 - Shared demo stock resets every 2 hours and on restart.

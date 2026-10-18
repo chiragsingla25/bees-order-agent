@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from bees_order.domain.models import ParsedItem, ParsedOrder
+from bees_order.domain.models import ParsedItem, ParsedOrder, Question
 from bees_order.services import db
 from bees_order.services.llm import ParseResult
 
@@ -38,17 +38,24 @@ def order(*items) -> ParsedOrder:
         for i in items])
 
 
+def info(topic, text="") -> ParsedOrder:
+    """What the LLM would return for a question (Phase 9)."""
+    return ParsedOrder(intent="info_request", question=Question(topic=topic, product_text=text))
+
+
 class StubParser:
     """Stands in for the LLM: message → ParsedOrder (or an exception to raise), from a table.
-    Counts calls, remembers the cart names it was shown, and can call a hook per call."""
+    Counts calls, remembers the cart names and the chat history it was shown, and can call
+    a hook per call."""
 
     def __init__(self, table: dict, on_call=None):
         self.table, self.on_call = table, on_call
-        self.calls, self.carts = 0, []
+        self.calls, self.carts, self.histories = 0, [], []
 
-    def __call__(self, msg, cart=()):
+    def __call__(self, msg, cart=(), history=()):
         self.calls += 1
         self.carts.append(list(cart))
+        self.histories.append([tuple(x) for x in history])
         if self.on_call:
             self.on_call()
         out = self.table[msg]

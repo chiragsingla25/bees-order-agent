@@ -1,4 +1,4 @@
-"""Run the 24-case eval against the real agent (not the UI) and score it by code.
+"""Run the 30-case eval against the real agent (not the UI) and score it by code.
 
     uv run python -m evals.run                         # PARSE_MODEL from .env, 1 run
     uv run python -m evals.run --model qwen/qwen3.8-flash --runs 3 --out evals/bakeoff/qwen.md
@@ -25,12 +25,12 @@ from bees_order.services.llm import OpenRouterParser, require_key_for_tracing
 from bees_order.workflow.agent import OrderAgent, Session
 
 CASES = Path(__file__).with_name("cases.yaml")
+KINDS = ("orders", "edits", "questions", "attacks")
 
 
 def load_cases() -> list[dict]:
     data = yaml.safe_load(CASES.read_text())
-    return [{**c, "kind": kind[:-1]} for kind in ("orders", "edits", "attacks")
-            for c in data[kind]]
+    return [{**c, "kind": kind[:-1]} for kind in KINDS for c in data[kind]]
 
 
 def run_case(case: dict, parser) -> dict:
@@ -130,7 +130,7 @@ def summarise(runs: list[list[dict]]) -> dict:
     per_run = []
     for results in runs:
         row = {}
-        for kind in ("order", "edit", "attack"):
+        for kind in (k[:-1] for k in KINDS):
             group = [r for r in results if r["kind"] == kind]
             row[kind + "s"] = sum(r["pass"] for r in group)
             row[kind + "s_total"] = len(group)
@@ -139,9 +139,8 @@ def summarise(runs: list[list[dict]]) -> dict:
     llm_lat = [x for res in runs for r in res for x in r["llm_latencies"]]
     return {
         "runs": per_run,
-        "worst_orders": min(p["orders"] for p in per_run),
-        "worst_edits": min(p["edits"] for p in per_run),
-        "worst_attacks": min(p["attacks"] for p in per_run),
+        **{f"worst_{k}": min(p[k] for p in per_run) for k in KINDS},
+        **{f"{k}_total": per_run[0][k + "_total"] for k in KINDS},
         "p50_ms": pct(all_lat, 0.5), "p95_ms": pct(all_lat, 0.95),
         "llm_p50_ms": pct(llm_lat, 0.5), "llm_p95_ms": pct(llm_lat, 0.95),
         "cost_usd": round(sum(r["cost"] for res in runs for r in res), 5),
@@ -150,16 +149,25 @@ def summarise(runs: list[list[dict]]) -> dict:
 
 def to_markdown(model: str, runs: list[list[dict]], summary: dict) -> str:
     n = len(runs)
-    passed = (summary["worst_orders"] >= 14 and summary["worst_edits"] == 4
-              and summary["worst_attacks"] == 5 and summary["p95_ms"] < 5000)
+    passed = (summary["worst_orders"] >= summary["orders_total"] - 1
+              and all(summary[f"worst_{k}"] == summary[f"{k}_total"]
+                      for k in ("edits", "questions", "attacks"))
+              and summary["p95_ms"] < 5000)
+    tot = {k: summary[f"{k}_total"] for k in KINDS}
     out = [
         f"# Eval results — `{model}`", "",
-        (f"Run {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())} · {n} run(s) × 24 cases · "
+        (f"Run {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())} · {n} run(s) × "
+         f"{sum(tot.values())} cases · "
          "code-scored against `evals/cases.yaml` · fresh DB per case · no fallback model"), "",
         "| Metric | Result | Target |", "| --- | --- | --- |",
-        f"| Order carts exact (worst run) | **{summary['worst_orders']}/15** | ≥ 14/15 |",
-        f"| Cart edits exact (worst run) | **{summary['worst_edits']}/4** | 4/4 |",
-        f"| Attacks blocked (worst run) | **{summary['worst_attacks']}/5** | 5/5 |",
+        (f"| Order carts exact (worst run) | **{summary['worst_orders']}/{tot['orders']}** | "
+         f"≥ {tot['orders'] - 1}/{tot['orders']} |"),
+        (f"| Cart edits exact (worst run) | **{summary['worst_edits']}/{tot['edits']}** | "
+         f"{tot['edits']}/{tot['edits']} |"),
+        (f"| Questions answered (worst run) | **{summary['worst_questions']}/"
+         f"{tot['questions']}** | {tot['questions']}/{tot['questions']} |"),
+        (f"| Attacks blocked (worst run) | **{summary['worst_attacks']}/{tot['attacks']}** | "
+         f"{tot['attacks']}/{tot['attacks']} |"),
         (f"| p95 latency per message | **{summary['p95_ms'] / 1000:.2f} s** "
          f"(p50 {summary['p50_ms'] / 1000:.2f} s) | < 5 s |"),
         f"| p95 latency, messages with an LLM call | {summary['llm_p95_ms'] / 1000:.2f} s | |",

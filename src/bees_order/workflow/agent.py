@@ -2,13 +2,15 @@
 
 A Session is one browser tab. It owns one graph thread, which keeps its draft cart. The
 agent adds what the graph can't know: the demo's rate limits (R16), the lazy stock reset
-(R17), and whether a question is waiting for an answer.
+(R17), whether a question is waiting for an answer, and the chat history, which every
+message passes into the graph for the parse call.
 """
 
 import os
 import threading
 import time
 import uuid
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -55,6 +57,8 @@ class Limits:
     daily: DailyCallCap = field(default_factory=DailyCallCap)
 
 
+HISTORY_EXCHANGES = 100  # the parse call sees at most this many earlier exchanges
+
 # Values that belong to one call only; reset at the start of every new call.
 _FRESH = {"status": None, "reply": "", "edits": [], "order_id": None, "llm": None}
 
@@ -64,12 +68,15 @@ class Session:
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     asking: bool = False  # a clarify question is waiting for the next message
     llm_messages: int = 0  # messages that called the LLM (R16 session limit)
+    # (customer message, reply) pairs, oldest first. Kept here, not in the graph thread,
+    # because writing to a paused thread would disturb its open question.
+    history: deque = field(default_factory=lambda: deque(maxlen=HISTORY_EXCHANGES))
 
 
 @dataclass
 class Turn:
     reply: str
-    status: str  # cart | clarify | refused | no_items | error | not_configured | placed |
+    status: str  # cart | clarify | answered | refused | no_items | error | not_configured | placed |
     #              stock_changed | nothing_to_order | cleared | question_open |
     #              limit_session | limit_daily | ignored
     cart: dict | None = None  # the cart after this turn (None = empty)
@@ -93,31 +100,35 @@ class OrderAgent:
             return Turn(reply="", status="ignored", cart=self.cart(s))
         self._maybe_reset()
         if s.asking:  # the message answers the open question (no LLM call)
-            return self._run(s, Command(resume=text))
+            return self._run(s, Command(resume=text), said=text)
         if normalize(text) in CANCEL_WORDS:
-            return self.clear(s)
+            return self.clear(s, said=text)
         if self.limits and s.llm_messages >= self.limits.session_limit:
-            return Turn(reply=t("limit_session", n=self.limits.session_limit),
-                        status="limit_session", cart=self.cart(s))
+            return self._said(s, text, Turn(reply=t("limit_session", n=self.limits.session_limit),
+                                            status="limit_session", cart=self.cart(s)))
         if self.limits and self.limits.daily.exhausted():
-            return Turn(reply=t("limit_daily"), status="limit_daily", cart=self.cart(s))
-        return self._run(s, {**_FRESH, "action": "message", "message": text})
+            return self._said(s, text, Turn(reply=t("limit_daily"), status="limit_daily",
+                                            cart=self.cart(s)))
+        return self._run(s, {**_FRESH, "action": "message", "message": text,
+                             "history": [list(x) for x in s.history]}, said=text)
 
     def place_order(self, s: Session) -> Turn:
         """The Place order button. Typing never places an order."""
+        said = "(tapped Place order)"
         if s.asking:
-            return Turn(reply=t("question_open"), status="question_open", cart=self.cart(s))
+            return self._said(s, said, Turn(reply=t("question_open"), status="question_open",
+                                            cart=self.cart(s)))
         self._maybe_reset()
-        return self._run(s, {**_FRESH, "action": "place_order"})
+        return self._run(s, {**_FRESH, "action": "place_order"}, said=said)
 
-    def clear(self, s: Session) -> Turn:
+    def clear(self, s: Session, said: str = "(tapped Clear cart)") -> Turn:
         """The Clear cart button, or "clear cart" typed. Also drops an open question."""
-        return self._run(s, {**_FRESH, "action": "clear"})
+        return self._run(s, {**_FRESH, "action": "clear"}, said=said)
 
     def cart(self, s: Session) -> dict | None:
         return self.graph.get_state(self._config(s)).values.get("cart")
 
-    def _run(self, s: Session, graph_input) -> Turn:
+    def _run(self, s: Session, graph_input, said: str) -> Turn:
         t0 = time.perf_counter()
         # run_name labels the trace in LangSmith: message, place_order, clear or answer.
         name = graph_input["action"] if isinstance(graph_input, dict) else "answer"
@@ -130,10 +141,19 @@ class OrderAgent:
         question = result.get("__interrupt__")
         s.asking = bool(question)
         if question:
-            return Turn(reply=question[0].value["question"], status="clarify",
+            turn = Turn(reply=question[0].value["question"], status="clarify",
                         cart=result.get("cart"), llm=llm, ms=ms)
-        return Turn(reply=result.get("reply", ""), status=result.get("status") or "error",
-                    cart=result.get("cart"), order_id=result.get("order_id"), llm=llm, ms=ms)
+        else:
+            turn = Turn(reply=result.get("reply", ""), status=result.get("status") or "error",
+                        cart=result.get("cart"), order_id=result.get("order_id"), llm=llm,
+                        ms=ms)
+        return self._said(s, said, turn)
+
+    @staticmethod
+    def _said(s: Session, said: str, turn: Turn) -> Turn:
+        """Record one exchange in the session's chat history."""
+        s.history.append((said, turn.reply))
+        return turn
 
     def _maybe_reset(self) -> None:
         with self.lock:

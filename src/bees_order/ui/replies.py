@@ -2,7 +2,7 @@
 Code writes all replies; the LLM never does."""
 
 from bees_order.domain.matching import normalize
-from bees_order.domain.models import Cart, CartLine, Product
+from bees_order.domain.models import Cart, CartLine, MatchResult, Product, Question
 
 PACK_WORDS = {"cx": "case", "fardo": "pack", "engradado": "crate"}
 
@@ -25,10 +25,18 @@ T = {
     "clarify": "Which {text} did you mean?",
     "clarify_retry": "Sorry, I didn't get that. Reply with the number or the size.",
     "question_open": "Please answer the question above first.",
+    # Answers to the customer's own questions (info_request)
+    "cart_empty": "Your cart is empty. Tell me what you need.",
+    "cart_total": "Total: {total}.",
+    "last_change": "Last change: {change}",
+    "product_options": "We have these {text} options:",
+    "info_general": "I can tell you what's in your cart, what we just changed, and the price "
+                    "and stock of any product (also in the Products tab). What would you like "
+                    "to know?",
     # Everything else
     "refuse_off_topic": "Sorry, I can only help with beverage orders. "
                         "Try “10 cases of Brahma cans”.",
-    "refuse_data": "Sorry, I can't share that. I can help with your order.",
+    "refuse_restricted": "Sorry, I can't share that. I can help with your order.",
     "no_items": "Tell me what to add, change or remove. When the cart looks right, "
                 "tap Place order.",
     "error": "Sorry, I had trouble reading that message. Please try again.",
@@ -128,3 +136,61 @@ def describe_changes(events: list[dict], cart: Cart, products: dict[str, Product
             out.append(t("changed", name=p.name, old=qty_text(ev["before"], p),
                          new=qty_text(ev["after"], p)))
     return "\n\n".join(out) or t("no_items")
+
+
+def short_note(ln: CartLine, p: Product) -> str:
+    """The note on a short line, the same in the cart panel and in chat."""
+    asked = qty_text(ln.requested_units, p) if ln.available_unit == "pack" \
+        else f"{ln.requested_units} units"
+    return f"Only {ln.available} in stock · you asked for {asked}"
+
+
+def stock_label(p: Product) -> tuple[str, str]:
+    """(kind, text) for a product's stock, the same in the Products tab and in chat."""
+    packs = p.stock // p.units_per_pack
+    if packs == 0:
+        return "err", "Out of stock"
+    if packs <= 10:
+        return "warn", f"Low · {packs} {pack_word(p, packs)}"
+    return "ok", f"{packs} {pack_word(p, packs)} in stock"
+
+
+def product_info(p: Product) -> str:
+    """One product's price and stock, e.g. "Skol Can 350 ml: R$ 37.08 per case of 12
+    (R$ 3.09/unit) · 100 cases in stock"."""
+    return (f"{p.name}: {brl(p.unit_price_cents * p.units_per_pack)} per {pack_word(p)} of "
+            f"{p.units_per_pack} ({brl(p.unit_price_cents)}/unit) · {stock_label(p)[1]}")
+
+
+def cart_summary(cart: Cart | None, products: dict[str, Product]) -> str:
+    """The answer to "what's in my cart?": every line, then the total."""
+    if not cart or not cart.lines:
+        return t("cart_empty")
+    out = []
+    for ln in cart.lines:
+        p = products.get(ln.sku) if ln.sku else None
+        if ln.flag in ("ok", "short"):
+            line = f"• {qty_text(ln.units, p)} of {ln.name}: {brl(ln.line_total_cents)}"
+            out.append(line + (f" ({short_note(ln, p)})" if ln.flag == "short" else ""))
+        else:
+            asked = f"{qty_text(ln.requested_units, p)} of " if p and ln.requested_units else ""
+            out.append(f"• {asked}{ln.name}: {LABELS[ln.flag]}")
+    return "\n".join(out) + "\n\n" + t("cart_total", total=brl(cart.total_cents))
+
+
+def answer_text(q: Question, found: MatchResult | None, cart: Cart | None,
+                last_change: str | None, products: dict[str, Product]) -> str:
+    """The answer to an info_request. `found` is the match for a product question."""
+    if q.topic == "last_change" and last_change:
+        total = brl(cart.total_cents if cart else 0)
+        return t("last_change", change=last_change) + "\n\n" + t("cart_total", total=total)
+    if q.topic in ("cart", "last_change"):
+        return cart_summary(cart, products)
+    if found:
+        if found.status == "matched":
+            return product_info(products[found.sku]) + "."
+        if found.status == "ambiguous":
+            return "\n".join([t("product_options", text=q.product_text)]
+                             + [f"• {product_info(products[sku])}" for sku in found.candidates])
+        return t("unknown", name=q.product_text)
+    return t("info_general")

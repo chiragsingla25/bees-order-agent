@@ -10,7 +10,7 @@ import gradio as gr
 from bees_order.domain.models import Cart, CartLine, Product
 from bees_order.services import db
 from bees_order.services.llm import OpenRouterParser
-from bees_order.ui.replies import LABELS, brl, pack_word, qty_text
+from bees_order.ui.replies import LABELS, brl, pack_word, qty_text, short_note, stock_label
 from bees_order.workflow.agent import DailyCallCap, Limits, OrderAgent, Session, Turn
 
 CSS = (Path(__file__).parent / "style.css").read_text()
@@ -97,9 +97,7 @@ def _cart_line(ln: CartLine, p: Product | None, changed: bool = False) -> str:
         meta = qty_text(ln.requested_units, p) if p and ln.requested_units else ""
     if ln.flag == "short":
         kind += " warn"
-        asked = qty_text(ln.requested_units, p) if ln.available_unit == "pack" \
-            else f"{ln.requested_units} units"
-        pill = f"Only {ln.available} in stock · you asked for {asked}"
+        pill = short_note(ln, p)
     elif ln.flag != "ok":
         kind, pill, amount = "err", LABELS[ln.flag], "—"
     pill_html = f'<div class="pill">{pill}</div>' if pill else ""
@@ -119,13 +117,8 @@ def products_html(products: dict[str, Product], query: str | None = "") -> str:
     for p in products.values():
         if q and q not in p.name.lower():
             continue
-        packs = p.stock // p.units_per_pack
-        if packs == 0:
-            pill = '<span class="pill err">Out of stock</span>'
-        elif packs <= 10:
-            pill = f'<span class="pill warn">Low · {packs} {pack_word(p, packs)}</span>'
-        else:
-            pill = f'<span class="pill ok">{packs} {pack_word(p, packs)} in stock</span>'
+        kind, label = stock_label(p)
+        pill = f'<span class="pill {kind}">{label}</span>'
         row = (f'<div class="line"><div><div class="name">{p.name}</div>'
                f'<div class="meta">{pack_word(p).title()} of {p.units_per_pack} · '
                f'{brl(p.unit_price_cents)}/unit</div>{pill}</div>'
